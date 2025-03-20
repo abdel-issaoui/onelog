@@ -2,9 +2,8 @@ package onelog
 
 import (
 	"bytes"
-	"fmt"
 	"io"
-	"strconv"
+	"sync"
 )
 
 // Formatter defines the interface for formatting log entries.
@@ -49,8 +48,41 @@ type FormatterOptions struct {
 	CallerKey string
 }
 
+var defaultFormatterOptionsInstance *FormatterOptions
+var defaultFormatterOptionsOnce sync.Once
+
 // DefaultFormatterOptions returns the default formatter options.
 func DefaultFormatterOptions() FormatterOptions {
+	defaultFormatterOptionsOnce.Do(func() {
+		defaultFormatterOptionsInstance = &FormatterOptions{
+			NoTimestamp:      false,
+			NoLevel:          false,
+			NoColors:         false,
+			TimeFormat:       "2006-01-02T15:04:05.000Z07:00",
+			DisableQuote:     false,
+			DisableEscape:    false,
+			PrettyPrint:      false,
+			TruncateStrings:  0,
+			RedactedValue:    "[REDACTED]",
+			DisableNewline:   false,
+			FieldNameConverter: func(s string) string {
+				return s
+			},
+			OmitEmpty:  false,
+			TimeKey:    "time",
+			LevelKey:   "level",
+			MessageKey: "message",
+			CallerKey:  "caller",
+		}
+	})
+
+	// Return a copy to prevent modifications
+	if defaultFormatterOptionsInstance != nil {
+		opts := *defaultFormatterOptionsInstance
+		return opts
+	}
+	
+	// Fallback if somehow the initialization failed
 	return FormatterOptions{
 		NoTimestamp:      false,
 		NoLevel:          false,
@@ -103,7 +135,7 @@ func FormatField(buf *bytes.Buffer, f Field, opts FormatterOptions) error {
 				}
 			}
 			if !opts.DisableEscape {
-				if err := writeEscapedString(buf, f.String[:opts.TruncateStrings]); err != nil {
+				if err := writeEscapedStringOptimized(buf, f.String[:opts.TruncateStrings]); err != nil {
 					return err
 				}
 				if _, err := buf.WriteString("..."); err != nil {
@@ -130,7 +162,7 @@ func FormatField(buf *bytes.Buffer, f Field, opts FormatterOptions) error {
 			}
 		}
 		if !opts.DisableEscape {
-			if err := writeEscapedString(buf, f.String); err != nil {
+			if err := writeEscapedStringOptimized(buf, f.String); err != nil {
 				return err
 			}
 		} else {
@@ -151,7 +183,7 @@ func FormatField(buf *bytes.Buffer, f Field, opts FormatterOptions) error {
 			}
 		}
 		if !opts.DisableEscape {
-			if err := writeEscapedString(buf, f.String); err != nil {
+			if err := writeEscapedStringOptimized(buf, f.String); err != nil {
 				return err
 			}
 		} else {
@@ -206,13 +238,13 @@ func FormatField(buf *bytes.Buffer, f Field, opts FormatterOptions) error {
 		}
 		return nil
 	case ObjectType, ArrayType, BinaryType:
-		// For complex types, use the JSON formatter
+		// For complex types, stringify and quote
 		if !opts.DisableQuote {
 			if err := writeQuote(buf); err != nil {
 				return err
 			}
 		}
-		if _, err := buf.WriteString(strconv.Quote(fmt.Sprintf("%v", f.Interface))); err != nil {
+		if _, err := buf.WriteString(stringifyValue(f.Interface)); err != nil {
 			return err
 		}
 		if !opts.DisableQuote {
@@ -229,72 +261,5 @@ func FormatField(buf *bytes.Buffer, f Field, opts FormatterOptions) error {
 
 // writeQuote writes a double quote to the buffer.
 func writeQuote(buf *bytes.Buffer) error {
-	_, err := buf.WriteString("\"")
-	return err
-}
-
-// writeEscapedString writes an escaped string to the buffer.
-func writeEscapedString(buf *bytes.Buffer, s string) error {
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch c {
-		case '\\', '"':
-			if err := buf.WriteByte('\\'); err != nil {
-				return err
-			}
-			if err := buf.WriteByte(c); err != nil {
-				return err
-			}
-		case '\n':
-			if err := buf.WriteByte('\\'); err != nil {
-				return err
-			}
-			if err := buf.WriteByte('n'); err != nil {
-				return err
-			}
-		case '\r':
-			if err := buf.WriteByte('\\'); err != nil {
-				return err
-			}
-			if err := buf.WriteByte('r'); err != nil {
-				return err
-			}
-		case '\t':
-			if err := buf.WriteByte('\\'); err != nil {
-				return err
-			}
-			if err := buf.WriteByte('t'); err != nil {
-				return err
-			}
-		default:
-			if err := buf.WriteByte(c); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// writeInt64 writes an int64 to the buffer.
-func writeInt64(buf *bytes.Buffer, i int64) error {
-	// Convert i to a string without allocations using itoa
-	s := strconv.FormatInt(i, 10)
-	_, err := buf.WriteString(s)
-	return err
-}
-
-// writeUint64 writes a uint64 to the buffer.
-func writeUint64(buf *bytes.Buffer, i uint64) error {
-	// Convert i to a string without allocations using uitoa
-	s := strconv.FormatUint(i, 10)
-	_, err := buf.WriteString(s)
-	return err
-}
-
-// writeFloat64 writes a float64 to the buffer.
-func writeFloat64(buf *bytes.Buffer, f float64) error {
-	// Convert f to a string with minimal allocations
-	s := strconv.FormatFloat(f, 'f', -1, 64)
-	_, err := buf.WriteString(s)
-	return err
+	return buf.WriteByte('"')
 }

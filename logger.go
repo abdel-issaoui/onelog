@@ -39,14 +39,29 @@ var (
 	entryPool = &sync.Pool{
 		New: func() interface{} {
 			return &Entry{
-				fields: make([]Field, 0, 8),
+				fields: make([]Field, 0, 16), // Increased initial capacity
 			}
 		},
 	}
 	
 	// Global exit function for testing
 	exit = os.Exit
+	
+	// Once guard for initialization
+	initOnce sync.Once
 )
+
+// init initializes package-level resources
+func init() {
+	initOnce.Do(func() {
+		// Preallocate some buffers to reduce initial allocation pressure
+		for i := 0; i < runtime.NumCPU(); i++ {
+			buf := &bytes.Buffer{}
+			buf.Grow(1024)
+			bufferPool.Put(buf)
+		}
+	})
+}
 
 // New creates a new Logger with the given configuration.
 func New(config *Config) *Logger {
@@ -65,7 +80,7 @@ func New(config *Config) *Logger {
 
 	// Set default values if not provided
 	if logger.formatter == nil {
-		logger.formatter = &TextFormatter{}
+		logger.formatter = NewTextFormatter()
 	}
 	if logger.writer == nil {
 		logger.writer = os.Stdout
@@ -76,6 +91,22 @@ func New(config *Config) *Logger {
 			bufferSize = 8192 // Default buffer size
 		}
 		logger.asyncBuffer = newAsyncBuffer(bufferSize, logger.writer)
+		
+		// Set backpressure mode and other async options
+		if config.BackpressureMode == BlockMode {
+			logger.asyncBuffer.SetBackpressureMode(BlockMode)
+		}
+		
+		if config.EnableDynamicBufferResizing {
+			logger.asyncBuffer.SetDynamicResize(true)
+			if config.BufferResizeThreshold > 0 {
+				logger.asyncBuffer.SetResizeThreshold(config.BufferResizeThreshold)
+			}
+		}
+		
+		if config.FlushInterval > 0 {
+			logger.asyncBuffer.SetFlushInterval(config.FlushInterval)
+		}
 	}
 
 	return logger
@@ -83,64 +114,74 @@ func New(config *Config) *Logger {
 
 // WithLevel returns a new Logger with the given level.
 func (l *Logger) WithLevel(level Level) *Logger {
-	newLogger := *l
-	newLogger.level = NewAtomicLevel(level)
-	return &newLogger
+	clone := *l
+	clone.level = NewAtomicLevel(level)
+	return &clone
 }
 
 // WithFormatter returns a new Logger with the given formatter.
 func (l *Logger) WithFormatter(formatter Formatter) *Logger {
-	newLogger := *l
-	newLogger.formatter = formatter
-	return &newLogger
+	clone := *l
+	clone.formatter = formatter
+	return &clone
 }
 
 // WithWriter returns a new Logger with the given writer.
 func (l *Logger) WithWriter(writer io.Writer) *Logger {
-	newLogger := *l
-	newLogger.writer = writer
-	if newLogger.EnableAsync {
-		newLogger.asyncBuffer = newAsyncBuffer(newLogger.asyncBuffer.size, writer)
+	clone := *l
+	clone.writer = writer
+	if clone.EnableAsync && l.asyncBuffer != nil {
+		// Create a new async buffer with the new writer
+		clone.asyncBuffer = newAsyncBuffer(l.asyncBuffer.size, writer)
+		
+		// Copy settings from the original buffer
+		clone.asyncBuffer.SetBackpressureMode(l.asyncBuffer.backpressureMode)
+		clone.asyncBuffer.SetDynamicResize(l.asyncBuffer.dynamicResize)
+		clone.asyncBuffer.SetResizeThreshold(l.asyncBuffer.resizeThreshold)
+		clone.asyncBuffer.SetFlushInterval(l.asyncBuffer.flushInterval)
 	}
-	return &newLogger
+	return &clone
 }
 
 // WithErrorHandler returns a new Logger with the given error handler.
 func (l *Logger) WithErrorHandler(handler func(error)) *Logger {
-	newLogger := *l
-	newLogger.errorHandler = handler
-	return &newLogger
+	clone := *l
+	clone.errorHandler = handler
+	return &clone
 }
 
 // WithAsync returns a new Logger with async logging enabled or disabled.
 func (l *Logger) WithAsync(enabled bool) *Logger {
-	newLogger := *l
-	newLogger.EnableAsync = enabled
-	if enabled && newLogger.asyncBuffer == nil {
-		newLogger.asyncBuffer = newAsyncBuffer(8192, newLogger.writer)
+	clone := *l
+	clone.EnableAsync = enabled
+	if enabled && clone.asyncBuffer == nil {
+		clone.asyncBuffer = newAsyncBuffer(8192, clone.writer)
 	}
-	return &newLogger
+	return &clone
 }
 
 // WithSampler returns a new Logger with the given sampler.
 func (l *Logger) WithSampler(sampler Sampler) *Logger {
-	newLogger := *l
-	newLogger.sampler = sampler
-	return &newLogger
+	clone := *l
+	clone.sampler = sampler
+	return &clone
 }
 
 // WithCaller returns a new Logger with caller information enabled or disabled.
 func (l *Logger) WithCaller(enabled bool) *Logger {
-	newLogger := *l
-	newLogger.enableCaller = enabled
-	return &newLogger
+	clone := *l
+	clone.enableCaller = enabled
+	return &clone
 }
 
 // WithHook returns a new Logger with the given hook added.
 func (l *Logger) WithHook(hook Hook) *Logger {
-	newLogger := *l
-	newLogger.hooks = append(newLogger.hooks, hook)
-	return &newLogger
+	clone := *l
+	if clone.hooks == nil {
+		clone.hooks = make([]Hook, 0, 4)
+	}
+	clone.hooks = append(clone.hooks, hook)
+	return &clone
 }
 
 // With returns a new Entry with the given fields.
@@ -163,7 +204,9 @@ func (l *Logger) Trace(msg string, fields ...Field) {
 		return
 	}
 	e := l.newEntry()
-	e.WithFields(fields)
+	if len(fields) > 0 {
+		e.WithFields(fields)
+	}
 	e.Trace(msg)
 }
 
@@ -173,7 +216,9 @@ func (l *Logger) Debug(msg string, fields ...Field) {
 		return
 	}
 	e := l.newEntry()
-	e.WithFields(fields)
+	if len(fields) > 0 {
+		e.WithFields(fields)
+	}
 	e.Debug(msg)
 }
 
@@ -183,7 +228,9 @@ func (l *Logger) Info(msg string, fields ...Field) {
 		return
 	}
 	e := l.newEntry()
-	e.WithFields(fields)
+	if len(fields) > 0 {
+		e.WithFields(fields)
+	}
 	e.Info(msg)
 }
 
@@ -193,7 +240,9 @@ func (l *Logger) Warn(msg string, fields ...Field) {
 		return
 	}
 	e := l.newEntry()
-	e.WithFields(fields)
+	if len(fields) > 0 {
+		e.WithFields(fields)
+	}
 	e.Warn(msg)
 }
 
@@ -203,7 +252,9 @@ func (l *Logger) Error(msg string, fields ...Field) {
 		return
 	}
 	e := l.newEntry()
-	e.WithFields(fields)
+	if len(fields) > 0 {
+		e.WithFields(fields)
+	}
 	e.Error(msg)
 }
 
@@ -213,7 +264,9 @@ func (l *Logger) Fatal(msg string, fields ...Field) {
 		return
 	}
 	e := l.newEntry()
-	e.WithFields(fields)
+	if len(fields) > 0 {
+		e.WithFields(fields)
+	}
 	e.Fatal(msg)
 }
 

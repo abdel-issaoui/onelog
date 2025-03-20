@@ -5,24 +5,20 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"sync"
 	"time"
 )
 
 // CLFFormatter formats log entries in Common Log Format (CLF).
 // CLF format: %h %l %u %t "%r" %>s %b
-// where:
-// %h is the remote host
-// %l is the remote logname (from identd, if supplied)
-// %u is the remote user (from auth)
-// %t is the time the request was received
-// %r is the request line
-// %>s is the status code
-// %b is the size of the response in bytes
 type CLFFormatter struct {
 	// Options contains the formatter options.
 	Options FormatterOptions
 	// ExtendedFormat enables extended format (include Referer and User-Agent).
 	ExtendedFormat bool
+	// timeCache caches formatted time strings
+	timeCache *sync.Map
 }
 
 // NewCLFFormatter creates a new CLFFormatter with default options.
@@ -30,12 +26,32 @@ func NewCLFFormatter() *CLFFormatter {
 	return &CLFFormatter{
 		Options:        DefaultFormatterOptions(),
 		ExtendedFormat: false,
+		timeCache:      &sync.Map{},
 	}
+}
+
+// getCachedTimeString gets a cached time string or formats a new one
+func (f *CLFFormatter) getCachedTimeString(t time.Time) string {
+	// Use time truncated to seconds as cache key for better hit rate
+	cacheKey := t.Truncate(time.Second)
+	if val, ok := f.timeCache.Load(cacheKey); ok {
+		cachedVal := val.(string)
+		if cachedVal != "" {
+			return cachedVal
+		}
+	}
+	
+	// Format the time and cache it
+	formatted := t.Format("02/Jan/2006:15:04:05 -0700")
+	f.timeCache.Store(cacheKey, formatted)
+	return formatted
 }
 
 // Format formats a log entry as CLF.
 func (f *CLFFormatter) Format(w io.Writer, e *Entry) error {
 	buf := bufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	buf.Grow(256) // Pre-allocate a reasonable size
 	defer bufferPool.Put(buf)
 	
 	// Extract required fields
@@ -44,8 +60,9 @@ func (f *CLFFormatter) Format(w io.Writer, e *Entry) error {
 	var responseSize int64
 	var referer, userAgent string
 	
-	// Find required fields
-	for _, field := range e.fields {
+	// Find required fields using faster iteration
+	for i := range e.fields {
+		field := &e.fields[i]
 		switch field.Key {
 		case "remote_host", "client_ip", "remote_addr", "ip":
 			remoteHost = field.String
@@ -77,7 +94,15 @@ func (f *CLFFormatter) Format(w io.Writer, e *Entry) error {
 		if protocol == "" {
 			protocol = "HTTP/1.1"
 		}
-		requestLine = fmt.Sprintf("%s %s %s", method, path, protocol)
+		// Avoid string concatenation, write directly to buffer
+		buf.Grow(len(method) + len(path) + len(protocol) + 2)
+		buf.WriteString(method)
+		buf.WriteByte(' ')
+		buf.WriteString(path)
+		buf.WriteByte(' ')
+		buf.WriteString(protocol)
+		requestLine = buf.String()
+		buf.Reset()
 	}
 	
 	// Format: %h %l %u %t "%r" %>s %b
@@ -105,7 +130,9 @@ func (f *CLFFormatter) Format(w io.Writer, e *Entry) error {
 	
 	// %t - Time the request was received
 	buf.WriteByte('[')
-	buf.WriteString(e.time.Format("02/Jan/2006:15:04:05 -0700"))
+	// Use cached time string
+	timeStr := f.getCachedTimeString(e.time)
+	buf.WriteString(timeStr)
 	buf.WriteByte(']')
 	buf.WriteByte(' ')
 	
@@ -122,14 +149,14 @@ func (f *CLFFormatter) Format(w io.Writer, e *Entry) error {
 	if statusCode <= 0 {
 		statusCode = 200 // Default to 200 if not provided
 	}
-	buf.WriteString(fmt.Sprintf("%d", statusCode))
+	buf.Write(strconv.AppendInt(buf.AvailableBuffer(), int64(statusCode), 10))
 	buf.WriteByte(' ')
 	
 	// %b - Size of the response in bytes
 	if responseSize <= 0 {
 		buf.WriteByte('-') // Use "-" for zero bytes
 	} else {
-		buf.WriteString(fmt.Sprintf("%d", responseSize))
+		buf.Write(strconv.AppendInt(buf.AvailableBuffer(), responseSize, 10))
 	}
 	
 	// Extended format fields (Combined Log Format)
@@ -165,7 +192,8 @@ func (f *CLFFormatter) Format(w io.Writer, e *Entry) error {
 
 // LogRequest creates log fields from an HTTP request.
 func LogRequest(r *http.Request, statusCode int, responseSize int64) []Field {
-	fields := make([]Field, 0, 8)
+	// Pre-allocate fields array with capacity for typical case
+	fields := make([]Field, 0, 10)
 	
 	// Remote host
 	remoteHost := r.RemoteAddr
@@ -174,7 +202,7 @@ func LogRequest(r *http.Request, statusCode int, responseSize int64) []Field {
 	}
 	
 	// Remote user
-	if r.URL.User != nil {
+	if r.URL != nil && r.URL.User != nil {
 		username := r.URL.User.Username()
 		if username != "" {
 			fields = append(fields, Str("remote_user", username))
@@ -185,7 +213,9 @@ func LogRequest(r *http.Request, statusCode int, responseSize int64) []Field {
 	fields = append(fields, Str("method", r.Method))
 	
 	// Path
-	fields = append(fields, Str("path", r.URL.Path))
+	if r.URL != nil {
+		fields = append(fields, Str("path", r.URL.Path))
+	}
 	
 	// Protocol
 	fields = append(fields, Str("protocol", r.Proto))
@@ -209,8 +239,10 @@ func LogRequest(r *http.Request, statusCode int, responseSize int64) []Field {
 	}
 	
 	// Build request line
-	requestLine := fmt.Sprintf("%s %s %s", r.Method, r.URL.Path, r.Proto)
-	fields = append(fields, Str("request_line", requestLine))
+	if r.URL != nil {
+		requestLine := fmt.Sprintf("%s %s %s", r.Method, r.URL.Path, r.Proto)
+		fields = append(fields, Str("request_line", requestLine))
+	}
 	
 	return fields
 }

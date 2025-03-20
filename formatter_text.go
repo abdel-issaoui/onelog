@@ -2,9 +2,10 @@ package onelog
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"sort"
+	"strconv"
+	"sync"
 	"time"
 )
 
@@ -22,6 +23,8 @@ type TextFormatter struct {
 	EnableFieldNames bool
 	// ForceQuote forces quoting of all values.
 	ForceQuote bool
+	// timeCache caches formatted time strings
+	timeCache *sync.Map
 }
 
 // NewTextFormatter creates a new TextFormatter with default options.
@@ -33,17 +36,39 @@ func NewTextFormatter() *TextFormatter {
 		DisableSorting:   false,
 		EnableFieldNames: true,
 		ForceQuote:       false,
+		timeCache:        &sync.Map{},
 	}
+}
+
+// getCachedTimeString gets a cached time string or formats a new one
+func (f *TextFormatter) getCachedTimeString(t time.Time, format string) string {
+	// Use time truncated to milliseconds as cache key for better hit rate
+	cacheKey := t.Truncate(time.Millisecond)
+	if val, ok := f.timeCache.Load(cacheKey); ok {
+		cachedVal := val.(string)
+		if cachedVal != "" {
+			return cachedVal
+		}
+	}
+	
+	// Format the time and cache it
+	formatted := t.Format(format)
+	f.timeCache.Store(cacheKey, formatted)
+	return formatted
 }
 
 // Format formats a log entry as text.
 func (f *TextFormatter) Format(w io.Writer, e *Entry) error {
 	buf := bufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	buf.Grow(256) // Pre-allocate a reasonable size
 	defer bufferPool.Put(buf)
 
 	// Write the timestamp
 	if !f.Options.NoTimestamp {
-		buf.WriteString(e.time.Format(f.Options.TimeFormat))
+		// Use cached time string when possible
+		timeStr := f.getCachedTimeString(e.time, f.Options.TimeFormat)
+		buf.WriteString(timeStr)
 		buf.WriteString(f.FieldSeparator)
 	}
 
@@ -65,7 +90,7 @@ func (f *TextFormatter) Format(w io.Writer, e *Entry) error {
 
 	// Get the fields
 	fields := e.fields
-	if !f.DisableSorting {
+	if !f.DisableSorting && len(fields) > 1 {
 		sort.Slice(fields, func(i, j int) bool {
 			return fields[i].Key < fields[j].Key
 		})
@@ -135,17 +160,17 @@ func (f *TextFormatter) formatFieldValue(buf *bytes.Buffer, field Field) {
 		if f.EnableColors {
 			buf.WriteString(numberColor)
 		}
-		writeInt64(buf, field.Integer)
+		buf.Write(strconv.AppendInt(buf.AvailableBuffer(), field.Integer, 10))
 	case UintType, Uint64Type:
 		if f.EnableColors {
 			buf.WriteString(numberColor)
 		}
-		writeUint64(buf, uint64(field.Integer))
+		buf.Write(strconv.AppendUint(buf.AvailableBuffer(), uint64(field.Integer), 10))
 	case Float32Type, Float64Type:
 		if f.EnableColors {
 			buf.WriteString(numberColor)
 		}
-		writeFloat64(buf, field.Float)
+		buf.Write(strconv.AppendFloat(buf.AvailableBuffer(), field.Float, 'f', -1, 64))
 	case StringType:
 		if f.EnableColors {
 			buf.WriteString(stringColor)
@@ -212,7 +237,8 @@ func (f *TextFormatter) formatFieldValue(buf *bytes.Buffer, field Field) {
 		if f.ForceQuote {
 			buf.WriteString("\"")
 		}
-		buf.WriteString(fmt.Sprintf("%v", field.Interface))
+		// Use stringifyValue helper for consistent formatting
+		buf.WriteString(stringifyValue(field.Interface))
 		if f.ForceQuote {
 			buf.WriteString("\"")
 		}

@@ -1,7 +1,9 @@
 package onelog
 
 import (
+	"hash"
 	"hash/fnv"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -32,7 +34,14 @@ func NewRateSampler(n int) *RateSampler {
 
 // Sample implements the Sampler interface.
 func (s *RateSampler) Sample(_ *Entry) bool {
-	// Increment the counter and check if it's a multiple of N.
+	// Use faster remainder check for powers of 2
+	if (s.N & (s.N - 1)) == 0 {
+		// N is a power of 2, use bitwise AND
+		mask := int64(s.N - 1)
+		return (atomic.AddInt64(&s.counter, 1) & mask) == 0
+	}
+	
+	// For non-power-of-2 values, use modulo
 	return atomic.AddInt64(&s.counter, 1)%int64(s.N) == 0
 }
 
@@ -42,6 +51,8 @@ type KeySampler struct {
 	N int
 	// Key is the field key to use for sampling.
 	Key string
+	// hashPool contains pre-allocated hash functions
+	hashPool sync.Pool
 }
 
 // NewKeySampler creates a new KeySampler with the given rate and key.
@@ -49,58 +60,65 @@ func NewKeySampler(n int, key string) *KeySampler {
 	if n <= 0 {
 		n = 1
 	}
+	
 	return &KeySampler{
 		N:   n,
 		Key: key,
+		hashPool: sync.Pool{
+			New: func() interface{} {
+				return fnv.New32a()
+			},
+		},
 	}
 }
 
 // Sample implements the Sampler interface.
 func (s *KeySampler) Sample(e *Entry) bool {
 	// Find the key field.
-	for _, field := range e.fields {
+	for i := range e.fields {
+		field := &e.fields[i]
 		if field.Key == s.Key {
+			// Get a hash function from the pool
+			h := s.hashPool.Get().(hash.Hash32)
+			h.Reset()
+			
 			// Hash the field value.
-			h := fnv.New32a()
 			switch field.Type {
 			case StringType:
 				h.Write([]byte(field.String))
 			case IntType, Int64Type:
 				var buf [8]byte
-				writeInt64Bytes(buf[:], field.Integer)
+				for i := 0; i < 8; i++ {
+					buf[i] = byte(field.Integer >> (i * 8))
+				}
 				h.Write(buf[:])
 			case UintType, Uint64Type:
 				var buf [8]byte
-				writeUint64Bytes(buf[:], uint64(field.Integer))
+				v := uint64(field.Integer)
+				for i := 0; i < 8; i++ {
+					buf[i] = byte(v >> (i * 8))
+				}
 				h.Write(buf[:])
 			case ErrorType:
 				h.Write([]byte(field.String))
 			default:
 				// Can't hash this, so sample it.
+				s.hashPool.Put(h)
 				return true
 			}
 
 			// Check if the hash is a multiple of N.
-			return h.Sum32()%uint32(s.N) == 0
+			result := h.Sum32()%uint32(s.N) == 0
+			
+			// Return the hash function to the pool
+			s.hashPool.Put(h)
+			
+			return result
 		}
 	}
 
 	// Key not found, so sample it.
 	return true
-}
-
-// writeInt64Bytes writes an int64 to a byte slice.
-func writeInt64Bytes(b []byte, v int64) {
-	for i := 0; i < 8; i++ {
-		b[i] = byte(v >> (i * 8))
-	}
-}
-
-// writeUint64Bytes writes a uint64 to a byte slice.
-func writeUint64Bytes(b []byte, v uint64) {
-	for i := 0; i < 8; i++ {
-		b[i] = byte(v >> (i * 8))
-	}
 }
 
 // AdaptiveSampler samples logs based on log volume.
@@ -124,6 +142,8 @@ type AdaptiveSampler struct {
 	volume int64
 	// lastReset is the last time the volume was reset.
 	lastReset time.Time
+	// rateLock protects rate changes
+	rateLock sync.RWMutex
 }
 
 // NewAdaptiveSampler creates a new AdaptiveSampler with the given parameters.
@@ -162,22 +182,44 @@ func (s *AdaptiveSampler) Sample(_ *Entry) bool {
 	// Check if we need to reset the volume.
 	now := time.Now()
 	if now.Sub(s.lastReset) > s.WindowSize {
-		// Adjust the sampling rate based on the volume.
-		volume := atomic.SwapInt64(&s.volume, 0)
-		s.lastReset = now
-
-		if volume > int64(s.Threshold) {
-			// Increase the sampling rate.
-			s.currentRate = min(s.currentRate*2, s.MaxRate)
-		} else {
-			// Decrease the sampling rate.
-			newRate := int(float64(s.currentRate) * s.DecayFactor)
-			s.currentRate = max(newRate, s.BaseRate)
-		}
+		// Need to make rate adjustments
+		s.adjustSamplingRate(now)
 	}
 
-	// Increment the counter and check if it's a multiple of the current rate.
-	return atomic.AddInt64(&s.counter, 1)%int64(s.currentRate) == 0
+	// Use a read lock for checking the current rate (faster for concurrent access)
+	s.rateLock.RLock()
+	currentRate := s.currentRate
+	s.rateLock.RUnlock()
+	
+	// Check if currentRate is a power of 2 for faster sampling decision
+	if (currentRate & (currentRate - 1)) == 0 {
+		// Power of 2 optimization
+		mask := int64(currentRate - 1)
+		return (atomic.AddInt64(&s.counter, 1) & mask) == 0
+	}
+	
+	// For non-power-of-2 values, use modulo
+	return atomic.AddInt64(&s.counter, 1)%int64(currentRate) == 0
+}
+
+// adjustSamplingRate adjusts the sampling rate based on current volume
+func (s *AdaptiveSampler) adjustSamplingRate(now time.Time) {
+	// Use a write lock for rate adjustments
+	s.rateLock.Lock()
+	defer s.rateLock.Unlock()
+	
+	// Get the volume and reset
+	volume := atomic.SwapInt64(&s.volume, 0)
+	s.lastReset = now
+
+	if volume > int64(s.Threshold) {
+		// Increase the sampling rate - double it but cap at MaxRate
+		s.currentRate = min(s.currentRate*2, s.MaxRate)
+	} else {
+		// Decrease the sampling rate gradually
+		newRate := int(float64(s.currentRate) * s.DecayFactor)
+		s.currentRate = max(newRate, s.BaseRate)
+	}
 }
 
 // min returns the minimum of two integers.
@@ -215,6 +257,8 @@ type SpikeSampler struct {
 	lastReset time.Time
 	// inSpike indicates whether we're currently in a spike.
 	inSpike bool
+	// lock protects inSpike
+	lock sync.RWMutex
 }
 
 // NewSpikeSampler creates a new SpikeSampler with the given parameters.
@@ -249,20 +293,42 @@ func (s *SpikeSampler) Sample(_ *Entry) bool {
 	now := time.Now()
 	if now.Sub(s.lastReset) > s.WindowSize {
 		// Check for spikes.
-		volume := atomic.SwapInt64(&s.volume, 0)
-		s.lastReset = now
-
-		s.inSpike = volume > int64(s.Threshold)
+		s.detectSpike(now)
 	}
 
 	// Use the appropriate sampling rate.
 	rate := s.NormalRate
+	
+	// Check spike status with read lock (faster for concurrent access)
+	s.lock.RLock()
 	if s.inSpike {
 		rate = s.SpikeRate
 	}
+	s.lock.RUnlock()
 
-	// Increment the counter and check if it's a multiple of the rate.
+	// Check if rate is a power of 2 for faster sampling
+	if (rate & (rate - 1)) == 0 {
+		// Power of 2 optimization
+		mask := int64(rate - 1)
+		return (atomic.AddInt64(&s.counter, 1) & mask) == 0
+	}
+	
+	// For non-power-of-2 rates, use modulo
 	return atomic.AddInt64(&s.counter, 1)%int64(rate) == 0
+}
+
+// detectSpike checks for traffic spikes and updates state
+func (s *SpikeSampler) detectSpike(now time.Time) {
+	// Use a write lock when updating spike status
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	
+	// Get the volume and reset
+	volume := atomic.SwapInt64(&s.volume, 0)
+	s.lastReset = now
+
+	// Update spike status
+	s.inSpike = volume > int64(s.Threshold)
 }
 
 // MultiSampler combines multiple samplers.

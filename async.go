@@ -2,6 +2,7 @@ package onelog
 
 import (
 	"io"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -49,6 +50,10 @@ type asyncBuffer struct {
 	resizeThreshold int
 	// The flush interval.
 	flushInterval time.Duration
+	// Shard count for reducing contention
+	shardCount int
+	// Shard locks
+	shardLocks []sync.Mutex
 }
 
 // newAsyncBuffer creates a new asyncBuffer.
@@ -56,6 +61,15 @@ func newAsyncBuffer(size int, writer io.Writer) *asyncBuffer {
 	// Ensure the size is a power of 2.
 	if size <= 0 || (size&(size-1)) != 0 {
 		size = roundUpPowerOfTwo(size)
+	}
+
+	// Determine shard count based on CPU count
+	shardCount := runtime.NumCPU()
+	if shardCount > 32 {
+		shardCount = 32 // Cap at reasonable maximum
+	}
+	if shardCount < 4 {
+		shardCount = 4 // Minimum shards
 	}
 
 	b := &asyncBuffer{
@@ -68,6 +82,8 @@ func newAsyncBuffer(size int, writer io.Writer) *asyncBuffer {
 		dynamicResize:    true,
 		resizeThreshold:  75, // 75% utilization
 		flushInterval:    100 * time.Millisecond,
+		shardCount:       shardCount,
+		shardLocks:       make([]sync.Mutex, shardCount),
 	}
 
 	// Start the worker goroutine.
@@ -91,58 +107,120 @@ func roundUpPowerOfTwo(n int) int {
 
 // write writes a log entry to the buffer.
 func (b *asyncBuffer) write(p []byte) error {
+	// Fast path for common case
+	writeIndex := atomic.LoadInt64(&b.writeIndex)
+	nextWriteIndex := writeIndex + 1
+	readIndex := atomic.LoadInt64(&b.readIndex)
+	usage := nextWriteIndex - readIndex
+
+	// Check if the buffer is full
+	if usage <= int64(b.size) {
+		// Try to get the slot first without locking
+		if atomic.CompareAndSwapInt64(&b.writeIndex, writeIndex, nextWriteIndex) {
+			// We got the slot, use sharded locks to write the entry
+			shardIndex := int(writeIndex % int64(b.shardCount))
+			b.shardLocks[shardIndex].Lock()
+			
+			// Copy the log entry
+			entry := make([]byte, len(p))
+			copy(entry, p)
+			b.buffer[writeIndex&b.mask] = entry
+			
+			b.shardLocks[shardIndex].Unlock()
+
+			// Update utilization metric
+			atomic.StoreInt64(&b.utilization, usage*100/int64(b.size))
+
+			// Maybe resize the buffer if utilization is high
+			if b.dynamicResize && usage*100/int64(b.size) > int64(b.resizeThreshold) {
+				go b.maybeResize()
+			}
+			
+			return nil
+		}
+	} else if b.backpressureMode == DropMode {
+		// In drop mode, drop the log entry
+		atomic.AddInt64(&b.dropCount, 1)
+		return ErrBufferFull
+	}
+
+	// Slow path - either contention or buffer full with block mode
+	return b.writeWithRetry(p)
+}
+
+// writeWithRetry implements the slow path for write.
+func (b *asyncBuffer) writeWithRetry(p []byte) error {
+	start := time.Now()
+	maxRetries := 100
+	retries := 0
+	backoff := time.Microsecond
+
 	b.resizeLock.RLock()
 	defer b.resizeLock.RUnlock()
 
-	// Copy the log entry.
-	entry := make([]byte, len(p))
-	copy(entry, p)
-
-	// Get the current write index.
-	writeIndex := atomic.LoadInt64(&b.writeIndex)
-
-	// Loop until we can write or drop.
 	for {
-		// Calculate the next write index.
+		writeIndex := atomic.LoadInt64(&b.writeIndex)
 		nextWriteIndex := writeIndex + 1
-		// Get the read index.
 		readIndex := atomic.LoadInt64(&b.readIndex)
-		// Calculate the buffer usage.
 		usage := nextWriteIndex - readIndex
 
-		// Check if the buffer is full.
+		// Check if the buffer is full
 		if usage > int64(b.size) {
-			// In drop mode, drop the log entry.
+			// In drop mode, drop the log entry
 			if b.backpressureMode == DropMode {
 				atomic.AddInt64(&b.dropCount, 1)
 				return ErrBufferFull
 			}
 
-			// In block mode, wait a bit and try again.
-			time.Sleep(1 * time.Millisecond)
-			writeIndex = atomic.LoadInt64(&b.writeIndex)
+			// In block mode, check for timeout or max retries
+			retries++
+			if retries > maxRetries || time.Since(start) > 5*time.Second {
+				atomic.AddInt64(&b.dropCount, 1)
+				return ErrBufferFull
+			}
+
+			// Exponential backoff with jitter
+			jitter := time.Duration(fastRand() % 1000)
+			time.Sleep(backoff + jitter*time.Nanosecond)
+			backoff *= 2
+			if backoff > 10*time.Millisecond {
+				backoff = 10 * time.Millisecond
+			}
 			continue
 		}
 
-		// Try to atomically update the write index.
+		// Try to atomically update the write index
 		if atomic.CompareAndSwapInt64(&b.writeIndex, writeIndex, nextWriteIndex) {
-			// We got the slot, write the log entry.
+			// We got the slot, use sharded locks to write the entry
+			shardIndex := int(writeIndex % int64(b.shardCount))
+			b.shardLocks[shardIndex].Lock()
+			
+			// Copy the log entry
+			entry := make([]byte, len(p))
+			copy(entry, p)
 			b.buffer[writeIndex&b.mask] = entry
+			
+			b.shardLocks[shardIndex].Unlock()
 
-			// Update utilization metric.
+			// Update utilization metric
 			atomic.StoreInt64(&b.utilization, usage*100/int64(b.size))
-
-			// Maybe resize the buffer.
-			if b.dynamicResize && usage*100/int64(b.size) > int64(b.resizeThreshold) {
-				go b.maybeResize()
-			}
 
 			return nil
 		}
 
-		// Someone else got the slot, try again.
-		writeIndex = atomic.LoadInt64(&b.writeIndex)
+		// Someone else got the slot, retry immediately
+		runtime.Gosched() // Yield to other goroutines
 	}
+}
+
+// fastRand is a fast random number generator 
+// (xorshift algorithm, not cryptographically secure but fast)
+func fastRand() uint32 {
+	x := uint32(time.Now().UnixNano())
+	x ^= x << 13
+	x ^= x >> 17
+	x ^= x << 5
+	return x
 }
 
 // maybeResize resizes the buffer if it's too full.
@@ -177,8 +255,19 @@ func (b *asyncBuffer) maybeResize() {
 	// Copy entries from the old buffer to the new buffer.
 	readIndex := atomic.LoadInt64(&b.readIndex)
 	writeIndex := atomic.LoadInt64(&b.writeIndex)
+	
+	// Lock all shards during resize
+	for i := range b.shardLocks {
+		b.shardLocks[i].Lock()
+	}
+	
 	for i := readIndex; i < writeIndex; i++ {
 		newBuffer[i&newMask] = b.buffer[i&b.mask]
+	}
+	
+	// Unlock all shards
+	for i := range b.shardLocks {
+		b.shardLocks[i].Unlock()
 	}
 
 	// Update the buffer, size, and mask.
@@ -226,8 +315,35 @@ func (b *asyncBuffer) flush() {
 	// Get the write index.
 	writeIndex := atomic.LoadInt64(&b.writeIndex)
 
-	// Process all entries from readIndex to writeIndex.
-	for i := readIndex; i < writeIndex; i++ {
+	// Nothing to flush
+	if readIndex >= writeIndex {
+		return
+	}
+
+	// Calculate batch size based on pending entries
+	batchSize := writeIndex - readIndex
+	if batchSize > 100 {
+		batchSize = 100 // Cap to avoid long flush times
+	}
+
+	// Process entries in batches for better efficiency
+	endIndex := readIndex + batchSize
+	if endIndex > writeIndex {
+		endIndex = writeIndex
+	}
+
+	// Lock the shards we'll access
+	shardSet := make(map[int]bool)
+	for i := readIndex; i < endIndex; i++ {
+		shardIndex := int(i % int64(b.shardCount))
+		if !shardSet[shardIndex] {
+			b.shardLocks[shardIndex].Lock()
+			shardSet[shardIndex] = true
+		}
+	}
+
+	// Process all entries in the batch
+	for i := readIndex; i < endIndex; i++ {
 		// Get the entry.
 		entry := b.buffer[i&b.mask]
 		if entry == nil {
@@ -237,15 +353,21 @@ func (b *asyncBuffer) flush() {
 		// Write the entry.
 		_, err := b.writer.Write(entry)
 		if err != nil {
-			// TODO: Handle error?
+			// Don't process more entries if we had an error
+			break
 		}
 
 		// Clear the entry.
 		b.buffer[i&b.mask] = nil
-
-		// Update the read index.
-		atomic.StoreInt64(&b.readIndex, i+1)
 	}
+
+	// Unlock the shards
+	for shardIndex := range shardSet {
+		b.shardLocks[shardIndex].Unlock()
+	}
+
+	// Update the read index atomically
+	atomic.StoreInt64(&b.readIndex, endIndex)
 }
 
 // SetBackpressureMode sets the backpressure mode.

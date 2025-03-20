@@ -1,7 +1,6 @@
 package onelog
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -132,13 +131,17 @@ func (e *Entry) Duration(key string, val time.Duration) *Entry {
 
 // Err adds an error field to the entry.
 func (e *Entry) Err(err error) *Entry {
-	e.fields = append(e.fields, Err(err))
+	if err != nil {
+		e.fields = append(e.fields, Err(err))
+	}
 	return e
 }
 
 // NamedErr adds a named error field to the entry.
 func (e *Entry) NamedErr(key string, err error) *Entry {
-	e.fields = append(e.fields, NamedErr(key, err))
+	if err != nil {
+		e.fields = append(e.fields, NamedErr(key, err))
+	}
 	return e
 }
 
@@ -179,11 +182,13 @@ func (e *Entry) Debug(msg string) {
 	}
 	e.level = DebugLevel
 	e.message = msg
+	e.level = DebugLevel
+	e.message = msg
 	e.write()
-}
-
-// Info logs a message at the info level.
-func (e *Entry) Info(msg string) {
+ }
+ 
+ // Info logs a message at the info level.
+ func (e *Entry) Info(msg string) {
 	if !e.logger.level.Enabled(InfoLevel) {
 		e.release()
 		return
@@ -191,10 +196,10 @@ func (e *Entry) Info(msg string) {
 	e.level = InfoLevel
 	e.message = msg
 	e.write()
-}
-
-// Warn logs a message at the warn level.
-func (e *Entry) Warn(msg string) {
+ }
+ 
+ // Warn logs a message at the warn level.
+ func (e *Entry) Warn(msg string) {
 	if !e.logger.level.Enabled(WarnLevel) {
 		e.release()
 		return
@@ -202,10 +207,10 @@ func (e *Entry) Warn(msg string) {
 	e.level = WarnLevel
 	e.message = msg
 	e.write()
-}
-
-// Error logs a message at the error level.
-func (e *Entry) Error(msg string) {
+ }
+ 
+ // Error logs a message at the error level.
+ func (e *Entry) Error(msg string) {
 	if !e.logger.level.Enabled(ErrorLevel) {
 		e.release()
 		return
@@ -213,10 +218,10 @@ func (e *Entry) Error(msg string) {
 	e.level = ErrorLevel
 	e.message = msg
 	e.write()
-}
-
-// Fatal logs a message at the fatal level and calls os.Exit(1).
-func (e *Entry) Fatal(msg string) {
+ }
+ 
+ // Fatal logs a message at the fatal level and calls os.Exit(1).
+ func (e *Entry) Fatal(msg string) {
 	if !e.logger.level.Enabled(FatalLevel) {
 		e.release()
 		return
@@ -225,10 +230,10 @@ func (e *Entry) Fatal(msg string) {
 	e.message = msg
 	e.write()
 	exit(1)
-}
-
-// Tracef logs a formatted message at the trace level.
-func (e *Entry) Tracef(format string, args ...interface{}) {
+ }
+ 
+ // Tracef logs a formatted message at the trace level.
+ func (e *Entry) Tracef(format string, args ...interface{}) {
 	if !e.logger.level.Enabled(TraceLevel) {
 		e.release()
 		return
@@ -236,10 +241,10 @@ func (e *Entry) Tracef(format string, args ...interface{}) {
 	e.level = TraceLevel
 	e.message = fmt.Sprintf(format, args...)
 	e.write()
-}
-
-// Debugf logs a formatted message at the debug level.
-func (e *Entry) Debugf(format string, args ...interface{}) {
+ }
+ 
+ // Debugf logs a formatted message at the debug level.
+ func (e *Entry) Debugf(format string, args ...interface{}) {
 	if !e.logger.level.Enabled(DebugLevel) {
 		e.release()
 		return
@@ -247,10 +252,10 @@ func (e *Entry) Debugf(format string, args ...interface{}) {
 	e.level = DebugLevel
 	e.message = fmt.Sprintf(format, args...)
 	e.write()
-}
-
-// Infof logs a formatted message at the info level.
-func (e *Entry) Infof(format string, args ...interface{}) {
+ }
+ 
+ // Infof logs a formatted message at the info level.
+ func (e *Entry) Infof(format string, args ...interface{}) {
 	if !e.logger.level.Enabled(InfoLevel) {
 		e.release()
 		return
@@ -258,10 +263,10 @@ func (e *Entry) Infof(format string, args ...interface{}) {
 	e.level = InfoLevel
 	e.message = fmt.Sprintf(format, args...)
 	e.write()
-}
-
-// Warnf logs a formatted message at the warn level.
-func (e *Entry) Warnf(format string, args ...interface{}) {
+ }
+ 
+ // Warnf logs a formatted message at the warn level.
+ func (e *Entry) Warnf(format string, args ...interface{}) {
 	if !e.logger.level.Enabled(WarnLevel) {
 		e.release()
 		return
@@ -269,10 +274,10 @@ func (e *Entry) Warnf(format string, args ...interface{}) {
 	e.level = WarnLevel
 	e.message = fmt.Sprintf(format, args...)
 	e.write()
-}
-
-// Errorf logs a formatted message at the error level.
-func (e *Entry) Errorf(format string, args ...interface{}) {
+ }
+ 
+ // Errorf logs a formatted message at the error level.
+ func (e *Entry) Errorf(format string, args ...interface{}) {
 	if !e.logger.level.Enabled(ErrorLevel) {
 		e.release()
 		return
@@ -280,10 +285,10 @@ func (e *Entry) Errorf(format string, args ...interface{}) {
 	e.level = ErrorLevel
 	e.message = fmt.Sprintf(format, args...)
 	e.write()
-}
-
-// Fatalf logs a formatted message at the fatal level and calls os.Exit(1).
-func (e *Entry) Fatalf(format string, args ...interface{}) {
+ }
+ 
+ // Fatalf logs a formatted message at the fatal level and calls os.Exit(1).
+ func (e *Entry) Fatalf(format string, args ...interface{}) {
 	if !e.logger.level.Enabled(FatalLevel) {
 		e.release()
 		return
@@ -292,71 +297,90 @@ func (e *Entry) Fatalf(format string, args ...interface{}) {
 	e.message = fmt.Sprintf(format, args...)
 	e.write()
 	exit(1)
-}
-
-// write writes the entry to the logger's writer.
-func (e *Entry) write() {
+ }
+ 
+ // write writes the entry to the logger's writer.
+ func (e *Entry) write() {
 	// If sampling is enabled, check if the entry should be sampled.
 	if e.logger.sampler != nil && !e.logger.sampler.Sample(e) {
 		e.release()
 		return
 	}
-
+ 
 	// If caller info is enabled, get the caller info.
 	if e.logger.enableCaller {
 		e.callerInfo = getCaller(2)
 	}
-
+ 
+	// Apply hooks if any
+	if len(e.logger.hooks) > 0 {
+		for _, hook := range e.logger.hooks {
+			if err := hook(e); err != nil && e.logger.errorHandler != nil {
+				e.logger.errorHandler(err)
+			}
+		}
+	}
+ 
 	// Format and write the entry.
-	buf := bufferPool.Get().(*bytes.Buffer)
-	defer bufferPool.Put(buf)
-
+	buf := GetBuffer(256) // Pre-allocate a reasonable size
+ 
 	if err := e.logger.formatter.Format(buf, e); err != nil {
 		// Handle formatting error
 		if e.logger.errorHandler != nil {
 			e.logger.errorHandler(err)
 		}
+		PutBuffer(buf)
 		e.release()
 		return
 	}
-
+ 
 	// Write the entry to the writer.
 	if e.logger.EnableAsync {
 		e.logger.writeAsync(buf.Bytes())
+		PutBuffer(buf)
 	} else {
 		if _, err := e.logger.writer.Write(buf.Bytes()); err != nil {
 			if e.logger.errorHandler != nil {
 				e.logger.errorHandler(err)
 			}
 		}
+		PutBuffer(buf)
 	}
-
+ 
 	e.release()
-}
-
-// release returns the entry to the pool.
-func (e *Entry) release() {
+ }
+ 
+ // release returns the entry to the pool.
+ func (e *Entry) release() {
+	// Clear references to help garbage collection
+	for i := range e.fields {
+		e.fields[i] = Field{} // Zero out fields
+	}
+	e.fields = e.fields[:0]
+	e.message = ""
+	e.ctx = nil
+	e.callerInfo = nil
 	entryPool.Put(e)
-}
-
-// Writer returns an io.Writer that writes to the entry at the given level.
-func (e *Entry) Writer(level Level) io.Writer {
+ }
+ 
+ // Writer returns an io.Writer that writes to the entry at the given level.
+ func (e *Entry) Writer(level Level) io.Writer {
 	return &entryWriter{
 		entry: e,
 		level: level,
 	}
-}
-
-// entryWriter is an io.Writer that writes to an entry.
-type entryWriter struct {
+ }
+ 
+ // entryWriter is an io.Writer that writes to an entry.
+ type entryWriter struct {
 	entry *Entry
 	level Level
-}
-
-// Write implements io.Writer.
-func (w *entryWriter) Write(p []byte) (int, error) {
+ }
+ 
+ // Write implements io.Writer.
+ func (w *entryWriter) Write(p []byte) (int, error) {
 	w.entry.level = w.level
 	w.entry.message = string(p)
 	w.entry.write()
 	return len(p), nil
-}
+ }

@@ -2,9 +2,10 @@ package onelog
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"sort"
+	"strconv"
+	"sync"
 	"time"
 )
 
@@ -16,6 +17,8 @@ type LogfmtFormatter struct {
 	DisableQuoting bool
 	// DisableSorting disables sorting of fields.
 	DisableSorting bool
+	// timeCache caches formatted time strings
+	timeCache *sync.Map
 }
 
 // NewLogfmtFormatter creates a new LogfmtFormatter with default options.
@@ -24,12 +27,32 @@ func NewLogfmtFormatter() *LogfmtFormatter {
 		Options:        DefaultFormatterOptions(),
 		DisableQuoting: false,
 		DisableSorting: false,
+		timeCache:      &sync.Map{},
 	}
+}
+
+// getCachedTimeString gets a cached time string or formats a new one
+func (f *LogfmtFormatter) getCachedTimeString(t time.Time, format string) string {
+	// Use time truncated to milliseconds as cache key for better hit rate
+	cacheKey := t.Truncate(time.Millisecond)
+	if val, ok := f.timeCache.Load(cacheKey); ok {
+		cachedVal := val.(string)
+		if cachedVal != "" {
+			return cachedVal
+		}
+	}
+	
+	// Format the time and cache it
+	formatted := t.Format(format)
+	f.timeCache.Store(cacheKey, formatted)
+	return formatted
 }
 
 // Format formats a log entry as logfmt.
 func (f *LogfmtFormatter) Format(w io.Writer, e *Entry) error {
 	buf := bufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	buf.Grow(256) // Pre-allocate a reasonable size
 	defer bufferPool.Put(buf)
 	
 	// Write the timestamp
@@ -39,7 +62,11 @@ func (f *LogfmtFormatter) Format(w io.Writer, e *Entry) error {
 		if !f.DisableQuoting {
 			buf.WriteByte('"')
 		}
-		buf.WriteString(e.time.Format(f.Options.TimeFormat))
+		
+		// Use cached time string when possible
+		timeStr := f.getCachedTimeString(e.time, f.Options.TimeFormat)
+		buf.WriteString(timeStr)
+		
 		if !f.DisableQuoting {
 			buf.WriteByte('"')
 		}
@@ -89,7 +116,7 @@ func (f *LogfmtFormatter) Format(w io.Writer, e *Entry) error {
 		}
 		writeEscapedLogfmtString(buf, e.callerInfo.File)
 		buf.WriteByte(':')
-		writeInt64(buf, int64(e.callerInfo.Line))
+		buf.Write(strconv.AppendInt(buf.AvailableBuffer(), int64(e.callerInfo.Line), 10))
 		if !f.DisableQuoting {
 			buf.WriteByte('"')
 		}
@@ -97,7 +124,7 @@ func (f *LogfmtFormatter) Format(w io.Writer, e *Entry) error {
 	
 	// Get the fields
 	fields := e.fields
-	if !f.DisableSorting {
+	if !f.DisableSorting && len(fields) > 1 {
 		sort.Slice(fields, func(i, j int) bool {
 			return fields[i].Key < fields[j].Key
 		})
@@ -127,7 +154,7 @@ func (f *LogfmtFormatter) Format(w io.Writer, e *Entry) error {
 	return err
 }
 
-// formatFieldValue formats a field value.
+// formatFieldValue formats a field value for logfmt.
 func (f *LogfmtFormatter) formatFieldValue(buf *bytes.Buffer, field Field) {
 	// If the field is sensitive, use the redacted value
 	if field.IsSensitive {
@@ -149,11 +176,11 @@ func (f *LogfmtFormatter) formatFieldValue(buf *bytes.Buffer, field Field) {
 			buf.WriteString("false")
 		}
 	case IntType, Int64Type:
-		writeInt64(buf, field.Integer)
+		buf.Write(strconv.AppendInt(buf.AvailableBuffer(), field.Integer, 10))
 	case UintType, Uint64Type:
-		writeUint64(buf, uint64(field.Integer))
+		buf.Write(strconv.AppendUint(buf.AvailableBuffer(), uint64(field.Integer), 10))
 	case Float32Type, Float64Type:
-		writeFloat64(buf, field.Float)
+		buf.Write(strconv.AppendFloat(buf.AvailableBuffer(), field.Float, 'f', -1, 64))
 	case StringType:
 		if !f.DisableQuoting {
 			buf.WriteByte('"')
@@ -205,7 +232,7 @@ func (f *LogfmtFormatter) formatFieldValue(buf *bytes.Buffer, field Field) {
 		if !f.DisableQuoting {
 			buf.WriteByte('"')
 		}
-		writeEscapedLogfmtString(buf, string([]byte(fmt.Sprintf("%v", field.Interface))))
+		writeEscapedLogfmtString(buf, stringifyValue(field.Interface))
 		if !f.DisableQuoting {
 			buf.WriteByte('"')
 		}
@@ -214,25 +241,39 @@ func (f *LogfmtFormatter) formatFieldValue(buf *bytes.Buffer, field Field) {
 	}
 }
 
-// writeEscapedLogfmtString writes an escaped string to the buffer.
+// writeEscapedLogfmtString writes an escaped string to the buffer optimized for logfmt.
 func writeEscapedLogfmtString(buf *bytes.Buffer, s string) {
+	start := 0
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		switch c {
-		case '\\', '"', ' ', '=':
+		if c == '\\' || c == '"' || c == ' ' || c == '=' {
+			if start < i {
+				buf.WriteString(s[start:i])
+			}
 			buf.WriteByte('\\')
 			buf.WriteByte(c)
-		case '\n':
-			buf.WriteByte('\\')
-			buf.WriteByte('n')
-		case '\r':
-			buf.WriteByte('\\')
-			buf.WriteByte('r')
-		case '\t':
-			buf.WriteByte('\\')
-			buf.WriteByte('t')
-		default:
-			buf.WriteByte(c)
+			start = i + 1
+		} else if c == '\n' {
+			if start < i {
+				buf.WriteString(s[start:i])
+			}
+			buf.WriteString("\\n")
+			start = i + 1
+		} else if c == '\r' {
+			if start < i {
+				buf.WriteString(s[start:i])
+			}
+			buf.WriteString("\\r")
+			start = i + 1
+		} else if c == '\t' {
+			if start < i {
+				buf.WriteString(s[start:i])
+			}
+			buf.WriteString("\\t")
+			start = i + 1
 		}
+	}
+	if start < len(s) {
+		buf.WriteString(s[start:])
 	}
 }
