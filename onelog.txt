@@ -1,0 +1,4720 @@
+=== Directory Structure (Golang Files) ===
+.
+├── async.go
+├── colors.go
+├── config.go
+├── default.go
+├── entry.go
+├── errors.go
+├── field.go
+├── formatter_clf.go
+├── formatter.go
+├── formatter_json.go
+├── formatter_logfmt.go
+├── formatter_text.go
+├── level.go
+├── logger.go
+├── pool.go
+├── sampling.go
+├── utils.go
+└── writer.go
+
+
+=== File Contents ===
+
+
+=== File: formatter_text.go ===
+FILE_PATH: formatter_text.go
+FILE_SIZE: 4878 bytes
+CONTENT_BEGIN
+package onelog
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"sort"
+	"time"
+)
+
+// TextFormatter formats log entries as human-readable text.
+type TextFormatter struct {
+	// Options contains the formatter options.
+	Options FormatterOptions
+	// FieldSeparator is the separator between fields.
+	FieldSeparator string
+	// EnableColors enables colored output.
+	EnableColors bool
+	// DisableSorting disables sorting of fields.
+	DisableSorting bool
+	// EnableFieldNames enables field names in the output.
+	EnableFieldNames bool
+	// ForceQuote forces quoting of all values.
+	ForceQuote bool
+}
+
+// NewTextFormatter creates a new TextFormatter with default options.
+func NewTextFormatter() *TextFormatter {
+	return &TextFormatter{
+		Options:          DefaultFormatterOptions(),
+		FieldSeparator:   " ",
+		EnableColors:     false,
+		DisableSorting:   false,
+		EnableFieldNames: true,
+		ForceQuote:       false,
+	}
+}
+
+// Format formats a log entry as text.
+func (f *TextFormatter) Format(w io.Writer, e *Entry) error {
+	buf := bufferPool.Get().(*bytes.Buffer)
+	defer bufferPool.Put(buf)
+
+	// Write the timestamp
+	if !f.Options.NoTimestamp {
+		buf.WriteString(e.time.Format(f.Options.TimeFormat))
+		buf.WriteString(f.FieldSeparator)
+	}
+
+	// Write the level
+	if !f.Options.NoLevel {
+		if f.EnableColors {
+			levelColor := getColorForLevel(e.level)
+			buf.WriteString(levelColor)
+			buf.WriteString(e.level.String())
+			buf.WriteString(resetColor)
+		} else {
+			buf.WriteString(e.level.String())
+		}
+		buf.WriteString(f.FieldSeparator)
+	}
+
+	// Write the message
+	buf.WriteString(e.message)
+
+	// Get the fields
+	fields := e.fields
+	if !f.DisableSorting {
+		sort.Slice(fields, func(i, j int) bool {
+			return fields[i].Key < fields[j].Key
+		})
+	}
+
+	// Write the fields
+	if len(fields) > 0 {
+		buf.WriteString(f.FieldSeparator)
+	}
+
+	for i, field := range fields {
+		if i > 0 {
+			buf.WriteString(f.FieldSeparator)
+		}
+
+		// Write the field name if enabled
+		if f.EnableFieldNames {
+			if f.EnableColors {
+				buf.WriteString(keyColor)
+			}
+			buf.WriteString(f.Options.FieldNameConverter(field.Key))
+			buf.WriteString("=")
+			if f.EnableColors {
+				buf.WriteString(resetColor)
+			}
+		}
+
+		// Format the field value
+		f.formatFieldValue(buf, field)
+	}
+
+	// Add a newline if not disabled
+	if !f.Options.DisableNewline {
+		buf.WriteByte('\n')
+	}
+
+	// Write the buffer to the writer
+	_, err := w.Write(buf.Bytes())
+	return err
+}
+
+// formatFieldValue formats a field value.
+func (f *TextFormatter) formatFieldValue(buf *bytes.Buffer, field Field) {
+	// If the field is sensitive, use the redacted value
+	if field.IsSensitive {
+		if f.ForceQuote {
+			buf.WriteString("\"")
+		}
+		buf.WriteString(f.Options.RedactedValue)
+		if f.ForceQuote {
+			buf.WriteString("\"")
+		}
+		return
+	}
+
+	switch field.Type {
+	case BoolType:
+		if f.EnableColors {
+			buf.WriteString(boolColor)
+		}
+		if field.Integer == 1 {
+			buf.WriteString("true")
+		} else {
+			buf.WriteString("false")
+		}
+	case IntType, Int64Type:
+		if f.EnableColors {
+			buf.WriteString(numberColor)
+		}
+		writeInt64(buf, field.Integer)
+	case UintType, Uint64Type:
+		if f.EnableColors {
+			buf.WriteString(numberColor)
+		}
+		writeUint64(buf, uint64(field.Integer))
+	case Float32Type, Float64Type:
+		if f.EnableColors {
+			buf.WriteString(numberColor)
+		}
+		writeFloat64(buf, field.Float)
+	case StringType:
+		if f.EnableColors {
+			buf.WriteString(stringColor)
+		}
+		if f.ForceQuote {
+			buf.WriteString("\"")
+		}
+		if f.Options.TruncateStrings > 0 && len(field.String) > f.Options.TruncateStrings {
+			buf.WriteString(field.String[:f.Options.TruncateStrings])
+			buf.WriteString("...")
+		} else {
+			buf.WriteString(field.String)
+		}
+		if f.ForceQuote {
+			buf.WriteString("\"")
+		}
+	case TimeType:
+		if f.EnableColors {
+			buf.WriteString(timeColor)
+		}
+		t, ok := field.Interface.(time.Time)
+		if !ok {
+			buf.WriteString("null")
+		} else {
+			if f.ForceQuote {
+				buf.WriteString("\"")
+			}
+			buf.WriteString(t.Format(f.Options.TimeFormat))
+			if f.ForceQuote {
+				buf.WriteString("\"")
+			}
+		}
+	case DurationType:
+		if f.EnableColors {
+			buf.WriteString(timeColor)
+		}
+		d, ok := field.Interface.(time.Duration)
+		if !ok {
+			buf.WriteString("null")
+		} else {
+			if f.ForceQuote {
+				buf.WriteString("\"")
+			}
+			buf.WriteString(d.String())
+			if f.ForceQuote {
+				buf.WriteString("\"")
+			}
+		}
+	case ErrorType:
+		if f.EnableColors {
+			buf.WriteString(errorStrColor)
+		}
+		if f.ForceQuote {
+			buf.WriteString("\"")
+		}
+		buf.WriteString(field.String)
+		if f.ForceQuote {
+			buf.WriteString("\"")
+		}
+	case ObjectType, ArrayType, BinaryType:
+		if f.EnableColors {
+			buf.WriteString(defaultColor)
+		}
+		if f.ForceQuote {
+			buf.WriteString("\"")
+		}
+		buf.WriteString(fmt.Sprintf("%v", field.Interface))
+		if f.ForceQuote {
+			buf.WriteString("\"")
+		}
+	default:
+		buf.WriteString("null")
+	}
+
+	if f.EnableColors {
+		buf.WriteString(resetColor)
+	}
+}CONTENT_END
+
+
+=== File: sampling.go ===
+FILE_PATH: sampling.go
+FILE_SIZE: 7500 bytes
+CONTENT_BEGIN
+package onelog
+
+import (
+	"hash/fnv"
+	"sync/atomic"
+	"time"
+)
+
+// Sampler is an interface for log samplers.
+type Sampler interface {
+	// Sample returns true if the log entry should be sampled.
+	Sample(e *Entry) bool
+}
+
+// RateSampler samples logs at a fixed rate.
+type RateSampler struct {
+	// N is the sample rate (1 in N).
+	N int
+	// Counter is the current counter value.
+	counter int64
+}
+
+// NewRateSampler creates a new RateSampler with the given rate.
+func NewRateSampler(n int) *RateSampler {
+	if n <= 0 {
+		n = 1
+	}
+	return &RateSampler{
+		N: n,
+	}
+}
+
+// Sample implements the Sampler interface.
+func (s *RateSampler) Sample(_ *Entry) bool {
+	// Increment the counter and check if it's a multiple of N.
+	return atomic.AddInt64(&s.counter, 1)%int64(s.N) == 0
+}
+
+// KeySampler samples logs based on a key field.
+type KeySampler struct {
+	// N is the sample rate (1 in N).
+	N int
+	// Key is the field key to use for sampling.
+	Key string
+}
+
+// NewKeySampler creates a new KeySampler with the given rate and key.
+func NewKeySampler(n int, key string) *KeySampler {
+	if n <= 0 {
+		n = 1
+	}
+	return &KeySampler{
+		N:   n,
+		Key: key,
+	}
+}
+
+// Sample implements the Sampler interface.
+func (s *KeySampler) Sample(e *Entry) bool {
+	// Find the key field.
+	for _, field := range e.fields {
+		if field.Key == s.Key {
+			// Hash the field value.
+			h := fnv.New32a()
+			switch field.Type {
+			case StringType:
+				h.Write([]byte(field.String))
+			case IntType, Int64Type:
+				var buf [8]byte
+				writeInt64Bytes(buf[:], field.Integer)
+				h.Write(buf[:])
+			case UintType, Uint64Type:
+				var buf [8]byte
+				writeUint64Bytes(buf[:], uint64(field.Integer))
+				h.Write(buf[:])
+			case ErrorType:
+				h.Write([]byte(field.String))
+			default:
+				// Can't hash this, so sample it.
+				return true
+			}
+
+			// Check if the hash is a multiple of N.
+			return h.Sum32()%uint32(s.N) == 0
+		}
+	}
+
+	// Key not found, so sample it.
+	return true
+}
+
+// writeInt64Bytes writes an int64 to a byte slice.
+func writeInt64Bytes(b []byte, v int64) {
+	for i := 0; i < 8; i++ {
+		b[i] = byte(v >> (i * 8))
+	}
+}
+
+// writeUint64Bytes writes a uint64 to a byte slice.
+func writeUint64Bytes(b []byte, v uint64) {
+	for i := 0; i < 8; i++ {
+		b[i] = byte(v >> (i * 8))
+	}
+}
+
+// AdaptiveSampler samples logs based on log volume.
+type AdaptiveSampler struct {
+	// BaseRate is the base sampling rate.
+	BaseRate int
+	// MaxRate is the maximum sampling rate.
+	MaxRate int
+	// WindowSize is the time window for volume measurement.
+	WindowSize time.Duration
+	// Threshold is the log volume threshold for increasing the sampling rate.
+	Threshold int
+	// DecayFactor is the decay factor for the sampling rate.
+	DecayFactor float64
+
+	// currentRate is the current sampling rate.
+	currentRate int
+	// counter is the current counter value.
+	counter int64
+	// volume is the log volume in the current window.
+	volume int64
+	// lastReset is the last time the volume was reset.
+	lastReset time.Time
+}
+
+// NewAdaptiveSampler creates a new AdaptiveSampler with the given parameters.
+func NewAdaptiveSampler(baseRate, maxRate int, windowSize time.Duration, threshold int, decayFactor float64) *AdaptiveSampler {
+	if baseRate <= 0 {
+		baseRate = 1
+	}
+	if maxRate <= 0 {
+		maxRate = 1000
+	}
+	if windowSize <= 0 {
+		windowSize = 1 * time.Second
+	}
+	if threshold <= 0 {
+		threshold = 1000
+	}
+	if decayFactor <= 0 || decayFactor >= 1 {
+		decayFactor = 0.9
+	}
+	return &AdaptiveSampler{
+		BaseRate:    baseRate,
+		MaxRate:     maxRate,
+		WindowSize:  windowSize,
+		Threshold:   threshold,
+		DecayFactor: decayFactor,
+		currentRate: baseRate,
+		lastReset:   time.Now(),
+	}
+}
+
+// Sample implements the Sampler interface.
+func (s *AdaptiveSampler) Sample(_ *Entry) bool {
+	// Increment the volume.
+	atomic.AddInt64(&s.volume, 1)
+
+	// Check if we need to reset the volume.
+	now := time.Now()
+	if now.Sub(s.lastReset) > s.WindowSize {
+		// Adjust the sampling rate based on the volume.
+		volume := atomic.SwapInt64(&s.volume, 0)
+		s.lastReset = now
+
+		if volume > int64(s.Threshold) {
+			// Increase the sampling rate.
+			s.currentRate = min(s.currentRate*2, s.MaxRate)
+		} else {
+			// Decrease the sampling rate.
+			newRate := int(float64(s.currentRate) * s.DecayFactor)
+			s.currentRate = max(newRate, s.BaseRate)
+		}
+	}
+
+	// Increment the counter and check if it's a multiple of the current rate.
+	return atomic.AddInt64(&s.counter, 1)%int64(s.currentRate) == 0
+}
+
+// min returns the minimum of two integers.
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// max returns the maximum of two integers.
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// SpikeSampler samples logs normally but reduces sampling during traffic spikes.
+type SpikeSampler struct {
+	// NormalRate is the normal sampling rate.
+	NormalRate int
+	// SpikeRate is the sampling rate during spikes.
+	SpikeRate int
+	// WindowSize is the time window for spike detection.
+	WindowSize time.Duration
+	// Threshold is the threshold for spike detection.
+	Threshold int
+
+	// counter is the current counter value.
+	counter int64
+	// volume is the log volume in the current window.
+	volume int64
+	// lastReset is the last time the volume was reset.
+	lastReset time.Time
+	// inSpike indicates whether we're currently in a spike.
+	inSpike bool
+}
+
+// NewSpikeSampler creates a new SpikeSampler with the given parameters.
+func NewSpikeSampler(normalRate, spikeRate int, windowSize time.Duration, threshold int) *SpikeSampler {
+	if normalRate <= 0 {
+		normalRate = 1
+	}
+	if spikeRate <= 0 {
+		spikeRate = 100
+	}
+	if windowSize <= 0 {
+		windowSize = 1 * time.Second
+	}
+	if threshold <= 0 {
+		threshold = 1000
+	}
+	return &SpikeSampler{
+		NormalRate: normalRate,
+		SpikeRate:  spikeRate,
+		WindowSize: windowSize,
+		Threshold:  threshold,
+		lastReset:  time.Now(),
+	}
+}
+
+// Sample implements the Sampler interface.
+func (s *SpikeSampler) Sample(_ *Entry) bool {
+	// Increment the volume.
+	atomic.AddInt64(&s.volume, 1)
+
+	// Check if we need to reset the volume.
+	now := time.Now()
+	if now.Sub(s.lastReset) > s.WindowSize {
+		// Check for spikes.
+		volume := atomic.SwapInt64(&s.volume, 0)
+		s.lastReset = now
+
+		s.inSpike = volume > int64(s.Threshold)
+	}
+
+	// Use the appropriate sampling rate.
+	rate := s.NormalRate
+	if s.inSpike {
+		rate = s.SpikeRate
+	}
+
+	// Increment the counter and check if it's a multiple of the rate.
+	return atomic.AddInt64(&s.counter, 1)%int64(rate) == 0
+}
+
+// MultiSampler combines multiple samplers.
+type MultiSampler struct {
+	// Samplers is the list of samplers.
+	Samplers []Sampler
+	// Mode is the sampling mode.
+	Mode MultiSamplerMode
+}
+
+// MultiSamplerMode is the mode for the MultiSampler.
+type MultiSamplerMode int
+
+const (
+	// AndMode samples only if all samplers sample.
+	AndMode MultiSamplerMode = iota
+	// OrMode samples if any sampler samples.
+	OrMode
+)
+
+// NewMultiSampler creates a new MultiSampler with the given samplers and mode.
+func NewMultiSampler(mode MultiSamplerMode, samplers ...Sampler) *MultiSampler {
+	return &MultiSampler{
+		Samplers: samplers,
+		Mode:     mode,
+	}
+}
+
+// Sample implements the Sampler interface.
+func (s *MultiSampler) Sample(e *Entry) bool {
+	if len(s.Samplers) == 0 {
+		return true
+	}
+
+	if s.Mode == AndMode {
+		// Sample only if all samplers sample.
+		for _, sampler := range s.Samplers {
+			if !sampler.Sample(e) {
+				return false
+			}
+		}
+		return true
+	}
+
+	// Sample if any sampler samples.
+	for _, sampler := range s.Samplers {
+		if sampler.Sample(e) {
+			return true
+		}
+	}
+	return false
+}CONTENT_END
+
+
+=== File: formatter_clf.go ===
+FILE_PATH: formatter_clf.go
+FILE_SIZE: 6899 bytes
+CONTENT_BEGIN
+package onelog
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"net/http"
+	"time"
+)
+
+// CLFFormatter formats log entries in Common Log Format (CLF).
+// CLF format: %h %l %u %t "%r" %>s %b
+// where:
+// %h is the remote host
+// %l is the remote logname (from identd, if supplied)
+// %u is the remote user (from auth)
+// %t is the time the request was received
+// %r is the request line
+// %>s is the status code
+// %b is the size of the response in bytes
+type CLFFormatter struct {
+	// Options contains the formatter options.
+	Options FormatterOptions
+	// ExtendedFormat enables extended format (include Referer and User-Agent).
+	ExtendedFormat bool
+}
+
+// NewCLFFormatter creates a new CLFFormatter with default options.
+func NewCLFFormatter() *CLFFormatter {
+	return &CLFFormatter{
+		Options:        DefaultFormatterOptions(),
+		ExtendedFormat: false,
+	}
+}
+
+// Format formats a log entry as CLF.
+func (f *CLFFormatter) Format(w io.Writer, e *Entry) error {
+	buf := bufferPool.Get().(*bytes.Buffer)
+	defer bufferPool.Put(buf)
+	
+	// Extract required fields
+	var remoteHost, remoteLogname, remoteUser, requestLine, method, path, protocol string
+	var statusCode int
+	var responseSize int64
+	var referer, userAgent string
+	
+	// Find required fields
+	for _, field := range e.fields {
+		switch field.Key {
+		case "remote_host", "client_ip", "remote_addr", "ip":
+			remoteHost = field.String
+		case "remote_logname", "logname":
+			remoteLogname = field.String
+		case "remote_user", "user":
+			remoteUser = field.String
+		case "request_line", "request":
+			requestLine = field.String
+		case "method":
+			method = field.String
+		case "path", "uri", "url":
+			path = field.String
+		case "protocol":
+			protocol = field.String
+		case "status", "status_code":
+			statusCode = int(field.Integer)
+		case "response_size", "bytes", "size":
+			responseSize = field.Integer
+		case "referer":
+			referer = field.String
+		case "user_agent":
+			userAgent = field.String
+		}
+	}
+	
+	// Try to build the request line if not provided
+	if requestLine == "" && method != "" && path != "" {
+		if protocol == "" {
+			protocol = "HTTP/1.1"
+		}
+		requestLine = fmt.Sprintf("%s %s %s", method, path, protocol)
+	}
+	
+	// Format: %h %l %u %t "%r" %>s %b
+	
+	// %h - Remote host
+	if remoteHost == "" {
+		remoteHost = "-"
+	}
+	buf.WriteString(remoteHost)
+	buf.WriteByte(' ')
+	
+	// %l - Remote logname (from identd, if supplied)
+	if remoteLogname == "" {
+		remoteLogname = "-"
+	}
+	buf.WriteString(remoteLogname)
+	buf.WriteByte(' ')
+	
+	// %u - Remote user (from auth)
+	if remoteUser == "" {
+		remoteUser = "-"
+	}
+	buf.WriteString(remoteUser)
+	buf.WriteByte(' ')
+	
+	// %t - Time the request was received
+	buf.WriteByte('[')
+	buf.WriteString(e.time.Format("02/Jan/2006:15:04:05 -0700"))
+	buf.WriteByte(']')
+	buf.WriteByte(' ')
+	
+	// %r - Request line
+	buf.WriteByte('"')
+	if requestLine == "" {
+		requestLine = "-"
+	}
+	buf.WriteString(requestLine)
+	buf.WriteByte('"')
+	buf.WriteByte(' ')
+	
+	// %>s - Status code
+	if statusCode <= 0 {
+		statusCode = 200 // Default to 200 if not provided
+	}
+	buf.WriteString(fmt.Sprintf("%d", statusCode))
+	buf.WriteByte(' ')
+	
+	// %b - Size of the response in bytes
+	if responseSize <= 0 {
+		buf.WriteByte('-') // Use "-" for zero bytes
+	} else {
+		buf.WriteString(fmt.Sprintf("%d", responseSize))
+	}
+	
+	// Extended format fields (Combined Log Format)
+	if f.ExtendedFormat {
+		// Referer
+		buf.WriteByte(' ')
+		buf.WriteByte('"')
+		if referer == "" {
+			referer = "-"
+		}
+		buf.WriteString(referer)
+		buf.WriteByte('"')
+		
+		// User-Agent
+		buf.WriteByte(' ')
+		buf.WriteByte('"')
+		if userAgent == "" {
+			userAgent = "-"
+		}
+		buf.WriteString(userAgent)
+		buf.WriteByte('"')
+	}
+	
+	// Add a newline if not disabled
+	if !f.Options.DisableNewline {
+		buf.WriteByte('\n')
+	}
+	
+	// Write the buffer to the writer
+	_, err := w.Write(buf.Bytes())
+	return err
+}
+
+// LogRequest creates log fields from an HTTP request.
+func LogRequest(r *http.Request, statusCode int, responseSize int64) []Field {
+	fields := make([]Field, 0, 8)
+	
+	// Remote host
+	remoteHost := r.RemoteAddr
+	if remoteHost != "" {
+		fields = append(fields, Str("remote_host", remoteHost))
+	}
+	
+	// Remote user
+	if r.URL.User != nil {
+		username := r.URL.User.Username()
+		if username != "" {
+			fields = append(fields, Str("remote_user", username))
+		}
+	}
+	
+	// Method
+	fields = append(fields, Str("method", r.Method))
+	
+	// Path
+	fields = append(fields, Str("path", r.URL.Path))
+	
+	// Protocol
+	fields = append(fields, Str("protocol", r.Proto))
+	
+	// Status code
+	fields = append(fields, Int("status_code", statusCode))
+	
+	// Response size
+	fields = append(fields, Int64("response_size", responseSize))
+	
+	// Referer
+	referer := r.Referer()
+	if referer != "" {
+		fields = append(fields, Str("referer", referer))
+	}
+	
+	// User-Agent
+	userAgent := r.UserAgent()
+	if userAgent != "" {
+		fields = append(fields, Str("user_agent", userAgent))
+	}
+	
+	// Build request line
+	requestLine := fmt.Sprintf("%s %s %s", r.Method, r.URL.Path, r.Proto)
+	fields = append(fields, Str("request_line", requestLine))
+	
+	return fields
+}
+
+// LogResponseWriter is a wrapper around http.ResponseWriter that captures the
+// status code and response size.
+type LogResponseWriter struct {
+	http.ResponseWriter
+	statusCode   int
+	responseSize int64
+}
+
+// NewLogResponseWriter creates a new LogResponseWriter.
+func NewLogResponseWriter(w http.ResponseWriter) *LogResponseWriter {
+	return &LogResponseWriter{
+		ResponseWriter: w,
+		statusCode:     200, // Default to 200 OK
+	}
+}
+
+// WriteHeader captures the status code.
+func (w *LogResponseWriter) WriteHeader(statusCode int) {
+	w.statusCode = statusCode
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+// Write captures the response size.
+func (w *LogResponseWriter) Write(b []byte) (int, error) {
+	size, err := w.ResponseWriter.Write(b)
+	w.responseSize += int64(size)
+	return size, err
+}
+
+// Status returns the status code.
+func (w *LogResponseWriter) Status() int {
+	return w.statusCode
+}
+
+// Size returns the response size.
+func (w *LogResponseWriter) Size() int64 {
+	return w.responseSize
+}
+
+// HTTPMiddleware returns a middleware function that logs requests.
+func HTTPMiddleware(logger *Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			
+			// Wrap the response writer
+			lw := NewLogResponseWriter(w)
+			
+			// Call the next handler
+			next.ServeHTTP(lw, r)
+			
+			// Log the request
+			duration := time.Since(start)
+			fields := LogRequest(r, lw.Status(), lw.Size())
+			fields = append(fields, Duration("duration", duration))
+			
+			// Log at the appropriate level based on status code
+			if lw.Status() >= 500 {
+				logger.Error("HTTP Request", fields...)
+			} else if lw.Status() >= 400 {
+				logger.Warn("HTTP Request", fields...)
+			} else {
+				logger.Info("HTTP Request", fields...)
+			}
+		})
+	}
+}CONTENT_END
+
+
+=== File: level.go ===
+FILE_PATH: level.go
+FILE_SIZE: 2882 bytes
+CONTENT_BEGIN
+// Package onelog provides a high-performance, structured logging package
+// optimized for speed, low memory allocation, and high throughput.
+package onelog
+
+import (
+	"fmt"
+	"strings"
+	"sync/atomic"
+)
+
+// Level represents the severity level of a log message.
+type Level uint32
+
+// Log levels.
+const (
+	// TraceLevel is the lowest level, used for detailed debugging information.
+	TraceLevel Level = iota
+	// DebugLevel is used for debugging information.
+	DebugLevel
+	// InfoLevel is used for general operational information.
+	InfoLevel
+	// WarnLevel is used for warnings that might require attention.
+	WarnLevel
+	// ErrorLevel is used for errors that should be addressed.
+	ErrorLevel
+	// FatalLevel is used for critical errors that require immediate attention.
+	// Logging at this level typically calls os.Exit(1).
+	FatalLevel
+	// Disabled turns off all logging.
+	Disabled
+)
+
+var levelNames = [...]string{
+	TraceLevel: "TRACE",
+	DebugLevel: "DEBUG",
+	InfoLevel:  "INFO",
+	WarnLevel:  "WARN",
+	ErrorLevel: "ERROR",
+	FatalLevel: "FATAL",
+	Disabled:   "DISABLED",
+}
+
+var levelMap = map[string]Level{
+	"TRACE":    TraceLevel,
+	"DEBUG":    DebugLevel,
+	"INFO":     InfoLevel,
+	"WARN":     WarnLevel,
+	"ERROR":    ErrorLevel,
+	"FATAL":    FatalLevel,
+	"DISABLED": Disabled,
+}
+
+// String returns the string representation of the log level.
+func (l Level) String() string {
+	if l >= Level(len(levelNames)) {
+		return fmt.Sprintf("Level(%d)", l)
+	}
+	return levelNames[l]
+}
+
+// ParseLevel parses a level string into a Level. It's case-insensitive.
+// Returns an error if the level string is invalid.
+func ParseLevel(levelStr string) (Level, error) {
+	upperLevelStr := strings.ToUpper(levelStr)
+	level, ok := levelMap[upperLevelStr]
+	if !ok {
+		return InfoLevel, fmt.Errorf("unknown level: %s", levelStr)
+	}
+	return level, nil
+}
+
+// MustParseLevel parses a level string into a Level. It's case-insensitive.
+// Panics if the level string is invalid.
+func MustParseLevel(levelStr string) Level {
+	level, err := ParseLevel(levelStr)
+	if err != nil {
+		panic(err)
+	}
+	return level
+}
+
+// AtomicLevel is an atomic wrapper around a Level value.
+type AtomicLevel struct {
+	level uint32
+}
+
+// NewAtomicLevel creates a new AtomicLevel with the given level.
+func NewAtomicLevel(level Level) *AtomicLevel {
+	return &AtomicLevel{
+		level: uint32(level),
+	}
+}
+
+// Level returns the wrapped Level value.
+func (a *AtomicLevel) Level() Level {
+	return Level(atomic.LoadUint32(&a.level))
+}
+
+// SetLevel sets the Level value.
+func (a *AtomicLevel) SetLevel(level Level) {
+	atomic.StoreUint32(&a.level, uint32(level))
+}
+
+// Enabled returns true if the given level is enabled.
+func (a *AtomicLevel) Enabled(level Level) bool {
+	return level >= Level(atomic.LoadUint32(&a.level))
+}
+
+// String returns the string representation of the AtomicLevel.
+func (a *AtomicLevel) String() string {
+	return a.Level().String()
+}CONTENT_END
+
+
+=== File: errors.go ===
+FILE_PATH: errors.go
+FILE_SIZE: 2470 bytes
+CONTENT_BEGIN
+package onelog
+
+import (
+	"errors"
+	"fmt"
+)
+
+// Common errors used throughout the package.
+var (
+	// ErrBufferFull is returned when the async buffer is full.
+	ErrBufferFull = errors.New("onelog: buffer full")
+	// ErrInvalidLevel is returned when an invalid log level is provided.
+	ErrInvalidLevel = errors.New("onelog: invalid log level")
+	// ErrInvalidFormatter is returned when an invalid formatter is provided.
+	ErrInvalidFormatter = errors.New("onelog: invalid formatter")
+	// ErrInvalidWriter is returned when an invalid writer is provided.
+	ErrInvalidWriter = errors.New("onelog: invalid writer")
+	// ErrWriteFailed is returned when a write operation fails.
+	ErrWriteFailed = errors.New("onelog: write failed")
+	// ErrLoggerClosed is returned when a closed logger is used.
+	ErrLoggerClosed = errors.New("onelog: logger closed")
+	// ErrFieldNotFound is returned when a field is not found.
+	ErrFieldNotFound = errors.New("onelog: field not found")
+)
+
+// WrapError wraps an error with a message.
+func WrapError(err error, message string) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", message, err)
+}
+
+// WrapErrorf wraps an error with a formatted message.
+func WrapErrorf(err error, format string, args ...interface{}) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", fmt.Sprintf(format, args...), err)
+}
+
+// IsBufferFullError returns whether the error is an ErrBufferFull.
+func IsBufferFullError(err error) bool {
+	return errors.Is(err, ErrBufferFull)
+}
+
+// IsInvalidLevelError returns whether the error is an ErrInvalidLevel.
+func IsInvalidLevelError(err error) bool {
+	return errors.Is(err, ErrInvalidLevel)
+}
+
+// IsInvalidFormatterError returns whether the error is an ErrInvalidFormatter.
+func IsInvalidFormatterError(err error) bool {
+	return errors.Is(err, ErrInvalidFormatter)
+}
+
+// IsInvalidWriterError returns whether the error is an ErrInvalidWriter.
+func IsInvalidWriterError(err error) bool {
+	return errors.Is(err, ErrInvalidWriter)
+}
+
+// IsWriteFailedError returns whether the error is an ErrWriteFailed.
+func IsWriteFailedError(err error) bool {
+	return errors.Is(err, ErrWriteFailed)
+}
+
+// IsLoggerClosedError returns whether the error is an ErrLoggerClosed.
+func IsLoggerClosedError(err error) bool {
+	return errors.Is(err, ErrLoggerClosed)
+}
+
+// IsFieldNotFoundError returns whether the error is an ErrFieldNotFound.
+func IsFieldNotFoundError(err error) bool {
+	return errors.Is(err, ErrFieldNotFound)
+}CONTENT_END
+
+
+=== File: formatter_logfmt.go ===
+FILE_PATH: formatter_logfmt.go
+FILE_SIZE: 5134 bytes
+CONTENT_BEGIN
+package onelog
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"sort"
+	"time"
+)
+
+// LogfmtFormatter formats log entries in logfmt format.
+type LogfmtFormatter struct {
+	// Options contains the formatter options.
+	Options FormatterOptions
+	// DisableQuoting disables quoting of values.
+	DisableQuoting bool
+	// DisableSorting disables sorting of fields.
+	DisableSorting bool
+}
+
+// NewLogfmtFormatter creates a new LogfmtFormatter with default options.
+func NewLogfmtFormatter() *LogfmtFormatter {
+	return &LogfmtFormatter{
+		Options:        DefaultFormatterOptions(),
+		DisableQuoting: false,
+		DisableSorting: false,
+	}
+}
+
+// Format formats a log entry as logfmt.
+func (f *LogfmtFormatter) Format(w io.Writer, e *Entry) error {
+	buf := bufferPool.Get().(*bytes.Buffer)
+	defer bufferPool.Put(buf)
+	
+	// Write the timestamp
+	if !f.Options.NoTimestamp {
+		buf.WriteString(f.Options.TimeKey)
+		buf.WriteByte('=')
+		if !f.DisableQuoting {
+			buf.WriteByte('"')
+		}
+		buf.WriteString(e.time.Format(f.Options.TimeFormat))
+		if !f.DisableQuoting {
+			buf.WriteByte('"')
+		}
+	}
+	
+	// Write the level
+	if !f.Options.NoLevel {
+		if buf.Len() > 0 {
+			buf.WriteByte(' ')
+		}
+		buf.WriteString(f.Options.LevelKey)
+		buf.WriteByte('=')
+		if !f.DisableQuoting {
+			buf.WriteByte('"')
+		}
+		buf.WriteString(e.level.String())
+		if !f.DisableQuoting {
+			buf.WriteByte('"')
+		}
+	}
+	
+	// Write the message
+	if e.message != "" {
+		if buf.Len() > 0 {
+			buf.WriteByte(' ')
+		}
+		buf.WriteString(f.Options.MessageKey)
+		buf.WriteByte('=')
+		if !f.DisableQuoting {
+			buf.WriteByte('"')
+		}
+		writeEscapedLogfmtString(buf, e.message)
+		if !f.DisableQuoting {
+			buf.WriteByte('"')
+		}
+	}
+	
+	// Write the caller info
+	if e.callerInfo != nil {
+		if buf.Len() > 0 {
+			buf.WriteByte(' ')
+		}
+		buf.WriteString(f.Options.CallerKey)
+		buf.WriteByte('=')
+		if !f.DisableQuoting {
+			buf.WriteByte('"')
+		}
+		writeEscapedLogfmtString(buf, e.callerInfo.File)
+		buf.WriteByte(':')
+		writeInt64(buf, int64(e.callerInfo.Line))
+		if !f.DisableQuoting {
+			buf.WriteByte('"')
+		}
+	}
+	
+	// Get the fields
+	fields := e.fields
+	if !f.DisableSorting {
+		sort.Slice(fields, func(i, j int) bool {
+			return fields[i].Key < fields[j].Key
+		})
+	}
+	
+	// Write the fields
+	for _, field := range fields {
+		if buf.Len() > 0 {
+			buf.WriteByte(' ')
+		}
+		
+		// Write the field key
+		writeEscapedLogfmtString(buf, f.Options.FieldNameConverter(field.Key))
+		buf.WriteByte('=')
+		
+		// Format the field value
+		f.formatFieldValue(buf, field)
+	}
+	
+	// Add a newline if not disabled
+	if !f.Options.DisableNewline {
+		buf.WriteByte('\n')
+	}
+	
+	// Write the buffer to the writer
+	_, err := w.Write(buf.Bytes())
+	return err
+}
+
+// formatFieldValue formats a field value.
+func (f *LogfmtFormatter) formatFieldValue(buf *bytes.Buffer, field Field) {
+	// If the field is sensitive, use the redacted value
+	if field.IsSensitive {
+		if !f.DisableQuoting {
+			buf.WriteByte('"')
+		}
+		buf.WriteString(f.Options.RedactedValue)
+		if !f.DisableQuoting {
+			buf.WriteByte('"')
+		}
+		return
+	}
+	
+	switch field.Type {
+	case BoolType:
+		if field.Integer == 1 {
+			buf.WriteString("true")
+		} else {
+			buf.WriteString("false")
+		}
+	case IntType, Int64Type:
+		writeInt64(buf, field.Integer)
+	case UintType, Uint64Type:
+		writeUint64(buf, uint64(field.Integer))
+	case Float32Type, Float64Type:
+		writeFloat64(buf, field.Float)
+	case StringType:
+		if !f.DisableQuoting {
+			buf.WriteByte('"')
+		}
+		if f.Options.TruncateStrings > 0 && len(field.String) > f.Options.TruncateStrings {
+			writeEscapedLogfmtString(buf, field.String[:f.Options.TruncateStrings])
+			buf.WriteString("...")
+		} else {
+			writeEscapedLogfmtString(buf, field.String)
+		}
+		if !f.DisableQuoting {
+			buf.WriteByte('"')
+		}
+	case TimeType:
+		t, ok := field.Interface.(time.Time)
+		if !ok {
+			buf.WriteString("null")
+		} else {
+			if !f.DisableQuoting {
+				buf.WriteByte('"')
+			}
+			buf.WriteString(t.Format(f.Options.TimeFormat))
+			if !f.DisableQuoting {
+				buf.WriteByte('"')
+			}
+		}
+	case DurationType:
+		d, ok := field.Interface.(time.Duration)
+		if !ok {
+			buf.WriteString("null")
+		} else {
+			if !f.DisableQuoting {
+				buf.WriteByte('"')
+			}
+			buf.WriteString(d.String())
+			if !f.DisableQuoting {
+				buf.WriteByte('"')
+			}
+		}
+	case ErrorType:
+		if !f.DisableQuoting {
+			buf.WriteByte('"')
+		}
+		writeEscapedLogfmtString(buf, field.String)
+		if !f.DisableQuoting {
+			buf.WriteByte('"')
+		}
+	case ObjectType, ArrayType, BinaryType:
+		if !f.DisableQuoting {
+			buf.WriteByte('"')
+		}
+		writeEscapedLogfmtString(buf, string([]byte(fmt.Sprintf("%v", field.Interface))))
+		if !f.DisableQuoting {
+			buf.WriteByte('"')
+		}
+	default:
+		buf.WriteString("null")
+	}
+}
+
+// writeEscapedLogfmtString writes an escaped string to the buffer.
+func writeEscapedLogfmtString(buf *bytes.Buffer, s string) {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch c {
+		case '\\', '"', ' ', '=':
+			buf.WriteByte('\\')
+			buf.WriteByte(c)
+		case '\n':
+			buf.WriteByte('\\')
+			buf.WriteByte('n')
+		case '\r':
+			buf.WriteByte('\\')
+			buf.WriteByte('r')
+		case '\t':
+			buf.WriteByte('\\')
+			buf.WriteByte('t')
+		default:
+			buf.WriteByte(c)
+		}
+	}
+}CONTENT_END
+
+
+=== File: formatter_json.go ===
+FILE_PATH: formatter_json.go
+FILE_SIZE: 4558 bytes
+CONTENT_BEGIN
+package onelog
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"time"
+)
+
+// JSONFormatter formats log entries as JSON.
+type JSONFormatter struct {
+	// Options contains the formatter options.
+	Options FormatterOptions
+	// DisableHTMLEscape disables HTML escaping.
+	DisableHTMLEscape bool
+}
+
+// NewJSONFormatter creates a new JSONFormatter with default options.
+func NewJSONFormatter() *JSONFormatter {
+	return &JSONFormatter{
+		Options: DefaultFormatterOptions(),
+	}
+}
+
+// Format formats a log entry as JSON.
+func (f *JSONFormatter) Format(w io.Writer, e *Entry) error {
+	buf := bufferPool.Get().(*bytes.Buffer)
+	defer bufferPool.Put(buf)
+
+	// Start the JSON object
+	buf.WriteByte('{')
+
+	// Write the timestamp
+	if !f.Options.NoTimestamp {
+		buf.WriteString("\"")
+		buf.WriteString(f.Options.TimeKey)
+		buf.WriteString("\":\"")
+		buf.WriteString(e.time.Format(f.Options.TimeFormat))
+		buf.WriteString("\"")
+	}
+
+	// Write the level
+	if !f.Options.NoLevel {
+		if buf.Len() > 1 {
+			buf.WriteByte(',')
+		}
+		buf.WriteString("\"")
+		buf.WriteString(f.Options.LevelKey)
+		buf.WriteString("\":\"")
+		buf.WriteString(e.level.String())
+		buf.WriteString("\"")
+	}
+
+	// Write the message
+	if e.message != "" {
+		if buf.Len() > 1 {
+			buf.WriteByte(',')
+		}
+		buf.WriteString("\"")
+		buf.WriteString(f.Options.MessageKey)
+		buf.WriteString("\":\"")
+		writeEscapedString(buf, e.message)
+		buf.WriteString("\"")
+	}
+
+	// Write the caller info
+	if e.callerInfo != nil {
+		if buf.Len() > 1 {
+			buf.WriteByte(',')
+		}
+		buf.WriteString("\"")
+		buf.WriteString(f.Options.CallerKey)
+		buf.WriteString("\":{\"file\":\"")
+		writeEscapedString(buf, e.callerInfo.File)
+		buf.WriteString("\",\"line\":")
+		writeInt64(buf, int64(e.callerInfo.Line))
+		buf.WriteString(",\"function\":\"")
+		writeEscapedString(buf, e.callerInfo.Function)
+		buf.WriteString("\"}")
+	}
+
+	// Write the fields
+	for _, field := range e.fields {
+		if buf.Len() > 1 {
+			buf.WriteByte(',')
+		}
+		buf.WriteString("\"")
+		writeEscapedString(buf, f.Options.FieldNameConverter(field.Key))
+		buf.WriteString("\":")
+
+		// Format the field value
+		switch field.Type {
+		case BoolType:
+			if field.Integer == 1 {
+				buf.WriteString("true")
+			} else {
+				buf.WriteString("false")
+			}
+		case IntType, Int64Type:
+			writeInt64(buf, field.Integer)
+		case UintType, Uint64Type:
+			writeUint64(buf, uint64(field.Integer))
+		case Float32Type, Float64Type:
+			writeFloat64(buf, field.Float)
+		case StringType:
+			buf.WriteByte('"')
+			if field.IsSensitive {
+				buf.WriteString(f.Options.RedactedValue)
+			} else {
+				writeEscapedString(buf, field.String)
+			}
+			buf.WriteByte('"')
+		case TimeType:
+			t, ok := field.Interface.(time.Time)
+			if !ok {
+				buf.WriteString("null")
+			} else {
+				buf.WriteByte('"')
+				buf.WriteString(t.Format(f.Options.TimeFormat))
+				buf.WriteByte('"')
+			}
+		case DurationType:
+			d, ok := field.Interface.(time.Duration)
+			if !ok {
+				buf.WriteString("null")
+			} else {
+				buf.WriteByte('"')
+				buf.WriteString(d.String())
+				buf.WriteByte('"')
+			}
+		case ErrorType:
+			buf.WriteByte('"')
+			if field.IsSensitive {
+				buf.WriteString(f.Options.RedactedValue)
+			} else {
+				writeEscapedString(buf, field.String)
+			}
+			buf.WriteByte('"')
+		case ObjectType:
+			// For simplicity, we'll just use a string representation
+			if field.IsSensitive {
+				buf.WriteByte('"')
+				buf.WriteString(f.Options.RedactedValue)
+				buf.WriteByte('"')
+			} else {
+				buf.WriteString("{\"value\":\"")
+				writeEscapedString(buf, fmt.Sprintf("%v", field.Interface))
+				buf.WriteString("\"}")
+			}
+		case ArrayType:
+			// For simplicity, we'll just use a string representation
+			if field.IsSensitive {
+				buf.WriteByte('"')
+				buf.WriteString(f.Options.RedactedValue)
+				buf.WriteByte('"')
+			} else {
+				buf.WriteString("[\"")
+				writeEscapedString(buf, fmt.Sprintf("%v", field.Interface))
+				buf.WriteString("\"]")
+			}
+		case BinaryType:
+			// For simplicity, we'll just use a string representation
+			if field.IsSensitive {
+				buf.WriteByte('"')
+				buf.WriteString(f.Options.RedactedValue)
+				buf.WriteByte('"')
+			} else {
+				data, ok := field.Interface.([]byte)
+				if !ok {
+					buf.WriteString("null")
+				} else {
+					buf.WriteString("\"")
+					writeEscapedString(buf, string(data))
+					buf.WriteString("\"")
+				}
+			}
+		default:
+			buf.WriteString("null")
+		}
+	}
+
+	// End the JSON object
+	buf.WriteByte('}')
+
+	// Add a newline if not disabled
+	if !f.Options.DisableNewline {
+		buf.WriteByte('\n')
+	}
+
+	// Write the buffer to the writer
+	_, err := w.Write(buf.Bytes())
+	return err
+}CONTENT_END
+
+
+=== File: async.go ===
+FILE_PATH: async.go
+FILE_SIZE: 6584 bytes
+CONTENT_BEGIN
+package onelog
+
+import (
+	"io"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// BackpressureMode defines how the asyncBuffer handles backpressure.
+type BackpressureMode int
+
+const (
+	// DropMode drops log entries when the buffer is full.
+	DropMode BackpressureMode = iota
+	// BlockMode blocks until space is available in the buffer.
+	BlockMode
+)
+
+// asyncBuffer is a lock-free ring buffer for asynchronous logging.
+type asyncBuffer struct {
+	// The buffer size (power of 2).
+	size int
+	// The buffer mask.
+	mask int64
+	// The read index.
+	readIndex int64
+	// The write index.
+	writeIndex int64
+	// The buffer.
+	buffer [][]byte
+	// The writer.
+	writer io.Writer
+	// The stop channel.
+	stopCh chan struct{}
+	// The wait group.
+	wg sync.WaitGroup
+	// The backpressure mode.
+	backpressureMode BackpressureMode
+	// The resize lock.
+	resizeLock sync.RWMutex
+	// The buffer utilization (0-100).
+	utilization int64
+	// The drop count.
+	dropCount int64
+	// Whether dynamic resizing is enabled.
+	dynamicResize bool
+	// The resize threshold.
+	resizeThreshold int
+	// The flush interval.
+	flushInterval time.Duration
+}
+
+// newAsyncBuffer creates a new asyncBuffer.
+func newAsyncBuffer(size int, writer io.Writer) *asyncBuffer {
+	// Ensure the size is a power of 2.
+	if size <= 0 || (size&(size-1)) != 0 {
+		size = roundUpPowerOfTwo(size)
+	}
+
+	b := &asyncBuffer{
+		size:             size,
+		mask:             int64(size - 1),
+		buffer:           make([][]byte, size),
+		writer:           writer,
+		stopCh:           make(chan struct{}),
+		backpressureMode: DropMode,
+		dynamicResize:    true,
+		resizeThreshold:  75, // 75% utilization
+		flushInterval:    100 * time.Millisecond,
+	}
+
+	// Start the worker goroutine.
+	b.wg.Add(1)
+	go b.worker()
+
+	return b
+}
+
+// roundUpPowerOfTwo rounds up to the next power of 2.
+func roundUpPowerOfTwo(n int) int {
+	n--
+	n |= n >> 1
+	n |= n >> 2
+	n |= n >> 4
+	n |= n >> 8
+	n |= n >> 16
+	n++
+	return n
+}
+
+// write writes a log entry to the buffer.
+func (b *asyncBuffer) write(p []byte) error {
+	b.resizeLock.RLock()
+	defer b.resizeLock.RUnlock()
+
+	// Copy the log entry.
+	entry := make([]byte, len(p))
+	copy(entry, p)
+
+	// Get the current write index.
+	writeIndex := atomic.LoadInt64(&b.writeIndex)
+
+	// Loop until we can write or drop.
+	for {
+		// Calculate the next write index.
+		nextWriteIndex := writeIndex + 1
+		// Get the read index.
+		readIndex := atomic.LoadInt64(&b.readIndex)
+		// Calculate the buffer usage.
+		usage := nextWriteIndex - readIndex
+
+		// Check if the buffer is full.
+		if usage > int64(b.size) {
+			// In drop mode, drop the log entry.
+			if b.backpressureMode == DropMode {
+				atomic.AddInt64(&b.dropCount, 1)
+				return ErrBufferFull
+			}
+
+			// In block mode, wait a bit and try again.
+			time.Sleep(1 * time.Millisecond)
+			writeIndex = atomic.LoadInt64(&b.writeIndex)
+			continue
+		}
+
+		// Try to atomically update the write index.
+		if atomic.CompareAndSwapInt64(&b.writeIndex, writeIndex, nextWriteIndex) {
+			// We got the slot, write the log entry.
+			b.buffer[writeIndex&b.mask] = entry
+
+			// Update utilization metric.
+			atomic.StoreInt64(&b.utilization, usage*100/int64(b.size))
+
+			// Maybe resize the buffer.
+			if b.dynamicResize && usage*100/int64(b.size) > int64(b.resizeThreshold) {
+				go b.maybeResize()
+			}
+
+			return nil
+		}
+
+		// Someone else got the slot, try again.
+		writeIndex = atomic.LoadInt64(&b.writeIndex)
+	}
+}
+
+// maybeResize resizes the buffer if it's too full.
+func (b *asyncBuffer) maybeResize() {
+	// Check if we need to resize.
+	utilization := atomic.LoadInt64(&b.utilization)
+	if utilization <= int64(b.resizeThreshold) {
+		return
+	}
+
+	// Acquire the resize lock.
+	b.resizeLock.Lock()
+	defer b.resizeLock.Unlock()
+
+	// Check again now that we have the lock.
+	utilization = atomic.LoadInt64(&b.utilization)
+	if utilization <= int64(b.resizeThreshold) {
+		return
+	}
+
+	// Calculate the new size.
+	newSize := b.size * 2
+	if newSize > 1024*1024 {
+		// Max buffer size is 1M entries.
+		return
+	}
+
+	// Create a new buffer.
+	newBuffer := make([][]byte, newSize)
+	newMask := int64(newSize - 1)
+
+	// Copy entries from the old buffer to the new buffer.
+	readIndex := atomic.LoadInt64(&b.readIndex)
+	writeIndex := atomic.LoadInt64(&b.writeIndex)
+	for i := readIndex; i < writeIndex; i++ {
+		newBuffer[i&newMask] = b.buffer[i&b.mask]
+	}
+
+	// Update the buffer, size, and mask.
+	b.buffer = newBuffer
+	b.size = newSize
+	b.mask = newMask
+}
+
+// close closes the buffer and waits for all writes to complete.
+func (b *asyncBuffer) close() error {
+	// Signal the worker to stop.
+	close(b.stopCh)
+	// Wait for the worker to finish.
+	b.wg.Wait()
+	return nil
+}
+
+// worker processes log entries from the buffer.
+func (b *asyncBuffer) worker() {
+	defer b.wg.Done()
+
+	ticker := time.NewTicker(b.flushInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-b.stopCh:
+			// Drain the buffer before exiting.
+			b.flush()
+			return
+		case <-ticker.C:
+			// Flush the buffer periodically.
+			b.flush()
+		}
+	}
+}
+
+// flush flushes the buffer.
+func (b *asyncBuffer) flush() {
+	b.resizeLock.RLock()
+	defer b.resizeLock.RUnlock()
+
+	// Get the read index.
+	readIndex := atomic.LoadInt64(&b.readIndex)
+	// Get the write index.
+	writeIndex := atomic.LoadInt64(&b.writeIndex)
+
+	// Process all entries from readIndex to writeIndex.
+	for i := readIndex; i < writeIndex; i++ {
+		// Get the entry.
+		entry := b.buffer[i&b.mask]
+		if entry == nil {
+			continue
+		}
+
+		// Write the entry.
+		_, err := b.writer.Write(entry)
+		if err != nil {
+			// TODO: Handle error?
+		}
+
+		// Clear the entry.
+		b.buffer[i&b.mask] = nil
+
+		// Update the read index.
+		atomic.StoreInt64(&b.readIndex, i+1)
+	}
+}
+
+// SetBackpressureMode sets the backpressure mode.
+func (b *asyncBuffer) SetBackpressureMode(mode BackpressureMode) {
+	b.backpressureMode = mode
+}
+
+// SetDynamicResize sets whether dynamic resizing is enabled.
+func (b *asyncBuffer) SetDynamicResize(enabled bool) {
+	b.dynamicResize = enabled
+}
+
+// SetResizeThreshold sets the resize threshold.
+func (b *asyncBuffer) SetResizeThreshold(threshold int) {
+	if threshold < 0 {
+		threshold = 0
+	}
+	if threshold > 100 {
+		threshold = 100
+	}
+	b.resizeThreshold = threshold
+}
+
+// SetFlushInterval sets the flush interval.
+func (b *asyncBuffer) SetFlushInterval(interval time.Duration) {
+	b.flushInterval = interval
+}
+
+// GetUtilization returns the buffer utilization (0-100).
+func (b *asyncBuffer) GetUtilization() int {
+	return int(atomic.LoadInt64(&b.utilization))
+}
+
+// GetDropCount returns the number of dropped log entries.
+func (b *asyncBuffer) GetDropCount() int64 {
+	return atomic.LoadInt64(&b.dropCount)
+}CONTENT_END
+
+
+=== File: default.go ===
+FILE_PATH: default.go
+FILE_SIZE: 7765 bytes
+CONTENT_BEGIN
+package onelog
+
+import (
+	"context"
+	"io"
+	"os"
+	"time"
+)
+
+// defaultLogger is the default logger.
+var defaultLogger = New(DefaultConfig())
+
+// DefaultLogger returns the default logger.
+func DefaultLogger() *Logger {
+	return defaultLogger
+}
+
+// SetDefaultLogger sets the default logger.
+func SetDefaultLogger(logger *Logger) {
+	defaultLogger = logger
+}
+
+// SetLevel sets the level of the default logger.
+func SetLevel(level Level) {
+	defaultLogger.SetLevel(level)
+}
+
+// GetLevel returns the level of the default logger.
+func GetLevel() Level {
+	return defaultLogger.GetLevel()
+}
+
+// SetFormatter sets the formatter of the default logger.
+func SetFormatter(formatter Formatter) {
+	defaultLogger.formatter = formatter
+}
+
+// SetWriter sets the writer of the default logger.
+func SetWriter(writer io.Writer) {
+	defaultLogger.writer = writer
+}
+
+// SetErrorHandler sets the error handler of the default logger.
+func SetErrorHandler(handler func(error)) {
+	defaultLogger.errorHandler = handler
+}
+
+// SetCaller enables or disables caller information in the default logger.
+func SetCaller(enabled bool) {
+	defaultLogger.enableCaller = enabled
+}
+
+// SetCallerSkip sets the number of stack frames to skip in the default logger.
+func SetCallerSkip(skip int) {
+	defaultLogger.callerSkip = skip
+}
+
+// SetAsync enables or disables asynchronous logging in the default logger.
+func SetAsync(enabled bool) {
+	defaultLogger.EnableAsync = enabled
+	if enabled && defaultLogger.asyncBuffer == nil {
+		defaultLogger.asyncBuffer = newAsyncBuffer(8192, defaultLogger.writer)
+	}
+}
+
+// SetSampler sets the sampler of the default logger.
+func SetSampler(sampler Sampler) {
+	defaultLogger.sampler = sampler
+}
+
+// With returns a new entry with the given fields from the default logger.
+func With(fields ...Field) *Entry {
+	return defaultLogger.With(fields...)
+}
+
+// WithContext returns a new entry with the given context from the default logger.
+func WithContext(ctx context.Context) *Entry {
+	return defaultLogger.WithContext(ctx)
+}
+
+// WriterLevel returns an io.Writer that writes to the default logger at the given level.
+func WriterLevel(level Level) io.Writer {
+	return defaultLogger.Writer(level)
+}
+
+// Close closes the default logger, flushing any buffered log entries.
+func Close() error {
+	return defaultLogger.Close()
+}
+
+// NewDevelopmentLogger returns a logger configured for development.
+func NewDevelopmentLogger() *Logger {
+	return New(NewConfig(
+		WithLevel(DebugLevel),
+		WithFormatter(NewTextFormatter()),
+		WithWriter(os.Stdout),
+		WithCaller(true),
+		WithErrorHandler(func(err error) {
+			os.Stderr.WriteString("onelog: " + err.Error() + "\n")
+		}),
+	))
+}
+
+// NewProductionLogger returns a logger configured for production.
+func NewProductionLogger() *Logger {
+	return New(NewConfig(
+		WithLevel(InfoLevel),
+		WithFormatter(NewJSONFormatter()),
+		WithWriter(os.Stdout),
+		WithAsync(true),
+		WithAsyncBufferSize(32768),
+		WithBackpressureMode(DropMode),
+		WithSampling(true),
+		WithSampler(NewRateSampler(100)),
+		WithRedactSensitiveFields(true),
+		WithErrorHandler(func(err error) {
+			os.Stderr.WriteString("onelog: " + err.Error() + "\n")
+		}),
+	))
+}
+
+// NewHighPerformanceLogger returns a logger optimized for high performance.
+func NewHighPerformanceLogger() *Logger {
+	return New(NewConfig(
+		WithLevel(InfoLevel),
+		WithFormatter(&JSONFormatter{
+			Options: FormatterOptions{
+				DisableQuote:  false,
+				DisableEscape: false,
+				PrettyPrint:   false,
+				TimeFormat:    time.RFC3339Nano,
+			},
+		}),
+		WithWriter(os.Stdout),
+		WithAsync(true),
+		WithAsyncBufferSize(65536),
+		WithBackpressureMode(DropMode),
+		WithSampling(true),
+		WithSampler(NewAdaptiveSampler(1, 1000, 1*time.Second, 10000, 0.9)),
+		WithCaller(false),
+		WithDynamicBufferResizing(true),
+		WithBufferResizeThreshold(75),
+		WithFlushInterval(100 * time.Millisecond),
+		WithRedactSensitiveFields(true),
+		WithErrorHandler(func(err error) {
+			os.Stderr.WriteString("onelog: " + err.Error() + "\n")
+		}),
+	))
+}
+
+// NewQuietLogger returns a logger that only outputs error and fatal logs.
+func NewQuietLogger() *Logger {
+	return New(NewConfig(
+		WithLevel(ErrorLevel),
+		WithFormatter(NewTextFormatter()),
+		WithWriter(os.Stderr),
+	))
+}
+
+// NewVerboseLogger returns a logger that outputs all logs including trace level.
+func NewVerboseLogger() *Logger {
+	return New(NewConfig(
+		WithLevel(TraceLevel),
+		WithFormatter(NewTextFormatter()),
+		WithWriter(os.Stdout),
+		WithCaller(true),
+	))
+}
+
+// NewFileLogger returns a logger that writes to a file.
+func NewFileLogger(filename string) (*Logger, error) {
+	fileWriter, err := NewFileWriter(filename)
+	if err != nil {
+		return nil, err
+	}
+	
+	return New(NewConfig(
+		WithLevel(InfoLevel),
+		WithFormatter(NewJSONFormatter()),
+		WithWriter(fileWriter),
+		WithAsync(true),
+	)), nil
+}
+
+// NewRotatingFileLogger returns a logger that writes to a rotating file.
+func NewRotatingFileLogger(filename string, maxSize int64, maxAge time.Duration, maxBackups int) (*Logger, error) {
+	fileWriter, err := NewFileWriter(
+		filename,
+		WithMaxSize(maxSize),
+		WithMaxAge(maxAge),
+		WithMaxBackups(maxBackups),
+		WithCompress(true),
+	)
+	if err != nil {
+		return nil, err
+	}
+	
+	return New(NewConfig(
+		WithLevel(InfoLevel),
+		WithFormatter(NewJSONFormatter()),
+		WithWriter(fileWriter),
+		WithAsync(true),
+	)), nil
+}
+
+// NewConsoleAndFileLogger returns a logger that writes to both console and file.
+func NewConsoleAndFileLogger(filename string) (*Logger, error) {
+	fileWriter, err := NewFileWriter(filename)
+	if err != nil {
+		return nil, err
+	}
+	
+	consoleWriter := NewConsoleWriter()
+	multiWriter := NewMultiWriter(consoleWriter, fileWriter)
+	
+	return New(NewConfig(
+		WithLevel(InfoLevel),
+		WithFormatter(NewJSONFormatter()),
+		WithWriter(multiWriter),
+		WithAsync(true),
+	)), nil
+}
+
+// Package-level logging functions
+
+// Trace logs a message at the trace level with the default logger.
+func Trace(msg string, fields ...Field) {
+	defaultLogger.Trace(msg, fields...)
+}
+
+// Debug logs a message at the debug level with the default logger.
+func Debug(msg string, fields ...Field) {
+	defaultLogger.Debug(msg, fields...)
+}
+
+// Info logs a message at the info level with the default logger.
+func Info(msg string, fields ...Field) {
+	defaultLogger.Info(msg, fields...)
+}
+
+// Warn logs a message at the warn level with the default logger.
+func Warn(msg string, fields ...Field) {
+	defaultLogger.Warn(msg, fields...)
+}
+
+// Error logs a message at the error level with the default logger.
+func Error(msg string, fields ...Field) {
+	defaultLogger.Error(msg, fields...)
+}
+
+// Fatal logs a message at the fatal level with the default logger and calls os.Exit(1).
+func Fatal(msg string, fields ...Field) {
+	defaultLogger.Fatal(msg, fields...)
+}
+
+// Tracef logs a formatted message at the trace level with the default logger.
+func Tracef(format string, args ...interface{}) {
+	defaultLogger.Tracef(format, args...)
+}
+
+// Debugf logs a formatted message at the debug level with the default logger.
+func Debugf(format string, args ...interface{}) {
+	defaultLogger.Debugf(format, args...)
+}
+
+// Infof logs a formatted message at the info level with the default logger.
+func Infof(format string, args ...interface{}) {
+	defaultLogger.Infof(format, args...)
+}
+
+// Warnf logs a formatted message at the warn level with the default logger.
+func Warnf(format string, args ...interface{}) {
+	defaultLogger.Warnf(format, args...)
+}
+
+// Errorf logs a formatted message at the error level with the default logger.
+func Errorf(format string, args ...interface{}) {
+	defaultLogger.Errorf(format, args...)
+}
+
+// Fatalf logs a formatted message at the fatal level with the default logger and calls os.Exit(1).
+func Fatalf(format string, args ...interface{}) {
+	defaultLogger.Fatalf(format, args...)
+}CONTENT_END
+
+
+=== File: formatter.go ===
+FILE_PATH: formatter.go
+FILE_SIZE: 7227 bytes
+CONTENT_BEGIN
+package onelog
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"strconv"
+)
+
+// Formatter defines the interface for formatting log entries.
+type Formatter interface {
+	// Format formats a log entry.
+	Format(w io.Writer, e *Entry) error
+}
+
+// FormatterOptions contains options for formatters.
+type FormatterOptions struct {
+	// NoTimestamp disables the timestamp in the log entry.
+	NoTimestamp bool
+	// NoLevel disables the level in the log entry.
+	NoLevel bool
+	// NoColors disables colors in the log entry.
+	NoColors bool
+	// TimeFormat sets the format for timestamps.
+	TimeFormat string
+	// DisableQuote disables quoting of strings.
+	DisableQuote bool
+	// DisableEscape disables escaping of strings.
+	DisableEscape bool
+	// PrettyPrint enables pretty-printing for JSON output.
+	PrettyPrint bool
+	// TruncateStrings truncates strings longer than the given length.
+	TruncateStrings int
+	// RedactedValue is the value to use for redacted fields.
+	RedactedValue string
+	// DisableNewline disables the trailing newline in the log entry.
+	DisableNewline bool
+	// FieldNameConverter converts field names.
+	FieldNameConverter func(string) string
+	// OmitEmpty omits fields with empty values.
+	OmitEmpty bool
+	// TimeKey is the key for the timestamp.
+	TimeKey string
+	// LevelKey is the key for the level.
+	LevelKey string
+	// MessageKey is the key for the message.
+	MessageKey string
+	// CallerKey is the key for the caller info.
+	CallerKey string
+}
+
+// DefaultFormatterOptions returns the default formatter options.
+func DefaultFormatterOptions() FormatterOptions {
+	return FormatterOptions{
+		NoTimestamp:      false,
+		NoLevel:          false,
+		NoColors:         false,
+		TimeFormat:       "2006-01-02T15:04:05.000Z07:00",
+		DisableQuote:     false,
+		DisableEscape:    false,
+		PrettyPrint:      false,
+		TruncateStrings:  0,
+		RedactedValue:    "[REDACTED]",
+		DisableNewline:   false,
+		FieldNameConverter: func(s string) string {
+			return s
+		},
+		OmitEmpty:  false,
+		TimeKey:    "time",
+		LevelKey:   "level",
+		MessageKey: "message",
+		CallerKey:  "caller",
+	}
+}
+
+// FormatField formats a field according to its type.
+func FormatField(buf *bytes.Buffer, f Field, opts FormatterOptions) error {
+	// If the field is sensitive, use the redacted value.
+	if f.IsSensitive {
+		_, err := buf.WriteString(opts.RedactedValue)
+		return err
+	}
+
+	switch f.Type {
+	case BoolType:
+		if f.Integer == 1 {
+			_, err := buf.WriteString("true")
+			return err
+		}
+		_, err := buf.WriteString("false")
+		return err
+	case IntType, Int64Type:
+		return writeInt64(buf, f.Integer)
+	case UintType, Uint64Type:
+		return writeUint64(buf, uint64(f.Integer))
+	case Float32Type, Float64Type:
+		return writeFloat64(buf, f.Float)
+	case StringType:
+		if opts.TruncateStrings > 0 && len(f.String) > opts.TruncateStrings {
+			if !opts.DisableQuote {
+				if err := writeQuote(buf); err != nil {
+					return err
+				}
+			}
+			if !opts.DisableEscape {
+				if err := writeEscapedString(buf, f.String[:opts.TruncateStrings]); err != nil {
+					return err
+				}
+				if _, err := buf.WriteString("..."); err != nil {
+					return err
+				}
+			} else {
+				if _, err := buf.WriteString(f.String[:opts.TruncateStrings]); err != nil {
+					return err
+				}
+				if _, err := buf.WriteString("..."); err != nil {
+					return err
+				}
+			}
+			if !opts.DisableQuote {
+				if err := writeQuote(buf); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		if !opts.DisableQuote {
+			if err := writeQuote(buf); err != nil {
+				return err
+			}
+		}
+		if !opts.DisableEscape {
+			if err := writeEscapedString(buf, f.String); err != nil {
+				return err
+			}
+		} else {
+			if _, err := buf.WriteString(f.String); err != nil {
+				return err
+			}
+		}
+		if !opts.DisableQuote {
+			if err := writeQuote(buf); err != nil {
+				return err
+			}
+		}
+		return nil
+	case ErrorType:
+		if !opts.DisableQuote {
+			if err := writeQuote(buf); err != nil {
+				return err
+			}
+		}
+		if !opts.DisableEscape {
+			if err := writeEscapedString(buf, f.String); err != nil {
+				return err
+			}
+		} else {
+			if _, err := buf.WriteString(f.String); err != nil {
+				return err
+			}
+		}
+		if !opts.DisableQuote {
+			if err := writeQuote(buf); err != nil {
+				return err
+			}
+		}
+		return nil
+	case TimeType:
+		t, ok := f.Interface.(interface{ Format(string) string })
+		if !ok {
+			_, err := buf.WriteString("null")
+			return err
+		}
+		if !opts.DisableQuote {
+			if err := writeQuote(buf); err != nil {
+				return err
+			}
+		}
+		if _, err := buf.WriteString(t.Format(opts.TimeFormat)); err != nil {
+			return err
+		}
+		if !opts.DisableQuote {
+			if err := writeQuote(buf); err != nil {
+				return err
+			}
+		}
+		return nil
+	case DurationType:
+		d, ok := f.Interface.(interface{ String() string })
+		if !ok {
+			_, err := buf.WriteString("null")
+			return err
+		}
+		if !opts.DisableQuote {
+			if err := writeQuote(buf); err != nil {
+				return err
+			}
+		}
+		if _, err := buf.WriteString(d.String()); err != nil {
+			return err
+		}
+		if !opts.DisableQuote {
+			if err := writeQuote(buf); err != nil {
+				return err
+			}
+		}
+		return nil
+	case ObjectType, ArrayType, BinaryType:
+		// For complex types, use the JSON formatter
+		if !opts.DisableQuote {
+			if err := writeQuote(buf); err != nil {
+				return err
+			}
+		}
+		if _, err := buf.WriteString(strconv.Quote(fmt.Sprintf("%v", f.Interface))); err != nil {
+			return err
+		}
+		if !opts.DisableQuote {
+			if err := writeQuote(buf); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		_, err := buf.WriteString("null")
+		return err
+	}
+}
+
+// writeQuote writes a double quote to the buffer.
+func writeQuote(buf *bytes.Buffer) error {
+	_, err := buf.WriteString("\"")
+	return err
+}
+
+// writeEscapedString writes an escaped string to the buffer.
+func writeEscapedString(buf *bytes.Buffer, s string) error {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch c {
+		case '\\', '"':
+			if err := buf.WriteByte('\\'); err != nil {
+				return err
+			}
+			if err := buf.WriteByte(c); err != nil {
+				return err
+			}
+		case '\n':
+			if err := buf.WriteByte('\\'); err != nil {
+				return err
+			}
+			if err := buf.WriteByte('n'); err != nil {
+				return err
+			}
+		case '\r':
+			if err := buf.WriteByte('\\'); err != nil {
+				return err
+			}
+			if err := buf.WriteByte('r'); err != nil {
+				return err
+			}
+		case '\t':
+			if err := buf.WriteByte('\\'); err != nil {
+				return err
+			}
+			if err := buf.WriteByte('t'); err != nil {
+				return err
+			}
+		default:
+			if err := buf.WriteByte(c); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// writeInt64 writes an int64 to the buffer.
+func writeInt64(buf *bytes.Buffer, i int64) error {
+	// Convert i to a string without allocations using itoa
+	s := strconv.FormatInt(i, 10)
+	_, err := buf.WriteString(s)
+	return err
+}
+
+// writeUint64 writes a uint64 to the buffer.
+func writeUint64(buf *bytes.Buffer, i uint64) error {
+	// Convert i to a string without allocations using uitoa
+	s := strconv.FormatUint(i, 10)
+	_, err := buf.WriteString(s)
+	return err
+}
+
+// writeFloat64 writes a float64 to the buffer.
+func writeFloat64(buf *bytes.Buffer, f float64) error {
+	// Convert f to a string with minimal allocations
+	s := strconv.FormatFloat(f, 'f', -1, 64)
+	_, err := buf.WriteString(s)
+	return err
+}CONTENT_END
+
+
+=== File: pool.go ===
+FILE_PATH: pool.go
+FILE_SIZE: 4413 bytes
+CONTENT_BEGIN
+package onelog
+
+import (
+	"sync"
+	"sync/atomic"
+)
+
+// fieldPool is a pool of field slices.
+type fieldPool struct {
+	pools     []*sync.Pool
+	sizes     []int
+	gets      int64
+	puts      int64
+	misses    int64
+	allocations int64
+}
+
+// newFieldPool creates a new field pool with the given capacity.
+func newFieldPool(maxCapacity int) *fieldPool {
+	// Create pools with increasing sizes
+	sizes := []int{8, 16, 32, 64, 128, 256, 512, 1024}
+	pools := make([]*sync.Pool, len(sizes))
+
+	for i, size := range sizes {
+		if size > maxCapacity {
+			break
+		}
+
+		size := size // Capture for closure
+		pools[i] = &sync.Pool{
+			New: func() interface{} {
+				return make([]Field, 0, size)
+			},
+		}
+	}
+
+	return &fieldPool{
+		pools: pools,
+		sizes: sizes,
+	}
+}
+
+// Get gets a field slice with the given capacity.
+func (p *fieldPool) Get(capacity int) []Field {
+	atomic.AddInt64(&p.gets, 1)
+
+	// Find the appropriate pool
+	for i, size := range p.sizes {
+		if capacity <= size {
+			if i < len(p.pools) && p.pools[i] != nil {
+				slice := p.pools[i].Get().([]Field)
+				return slice[:0] // Return with length 0
+			}
+		}
+	}
+
+	// No suitable pool found, allocate a new slice
+	atomic.AddInt64(&p.misses, 1)
+	atomic.AddInt64(&p.allocations, 1)
+	return make([]Field, 0, capacity)
+}
+
+// Put returns a field slice to the pool.
+func (p *fieldPool) Put(slice []Field) {
+	atomic.AddInt64(&p.puts, 1)
+
+	// Find the appropriate pool
+	cap := cap(slice)
+	for i, size := range p.sizes {
+		if cap <= size {
+			if i < len(p.pools) && p.pools[i] != nil {
+				// Clear the slice for security
+				for j := range slice {
+					slice[j] = Field{}
+				}
+				p.pools[i].Put(slice[:0]) // Return with length 0
+				return
+			}
+		}
+	}
+}
+
+// GetMetrics returns the pool metrics.
+func (p *fieldPool) GetMetrics() map[string]int64 {
+	return map[string]int64{
+		"gets":        atomic.LoadInt64(&p.gets),
+		"puts":        atomic.LoadInt64(&p.puts),
+		"misses":      atomic.LoadInt64(&p.misses),
+		"allocations": atomic.LoadInt64(&p.allocations),
+	}
+}
+
+// tieredBufferPool is a pool of byte buffers with different sizes.
+type tieredBufferPool struct {
+	pools     []*sync.Pool
+	sizes     []int
+	gets      int64
+	puts      int64
+	misses    int64
+	allocations int64
+}
+
+// newTieredBufferPool creates a new tiered buffer pool.
+func newTieredBufferPool() *tieredBufferPool {
+	// Create pools with increasing sizes
+	sizes := []int{256, 512, 1024, 2048, 4096, 8192, 16384, 32768}
+	pools := make([]*sync.Pool, len(sizes))
+
+	for i, size := range sizes {
+		size := size // Capture for closure
+		pools[i] = &sync.Pool{
+			New: func() interface{} {
+				return make([]byte, 0, size)
+			},
+		}
+	}
+
+	return &tieredBufferPool{
+		pools: pools,
+		sizes: sizes,
+	}
+}
+
+// Get gets a byte buffer with the given capacity.
+func (p *tieredBufferPool) Get(capacity int) []byte {
+	atomic.AddInt64(&p.gets, 1)
+
+	// Find the appropriate pool
+	for i, size := range p.sizes {
+		if capacity <= size {
+			if i < len(p.pools) && p.pools[i] != nil {
+				buf := p.pools[i].Get().([]byte)
+				return buf[:0] // Return with length 0
+			}
+		}
+	}
+
+	// No suitable pool found, allocate a new buffer
+	atomic.AddInt64(&p.misses, 1)
+	atomic.AddInt64(&p.allocations, 1)
+	return make([]byte, 0, capacity)
+}
+
+// Put returns a byte buffer to the pool.
+func (p *tieredBufferPool) Put(buf []byte) {
+	atomic.AddInt64(&p.puts, 1)
+
+	// Find the appropriate pool
+	cap := cap(buf)
+	for i, size := range p.sizes {
+		if cap <= size {
+			if i < len(p.pools) && p.pools[i] != nil {
+				// Clear the buffer for security
+				for j := range buf {
+					buf[j] = 0
+				}
+				p.pools[i].Put(buf[:0]) // Return with length 0
+				return
+			}
+		}
+	}
+}
+
+// GetMetrics returns the pool metrics.
+func (p *tieredBufferPool) GetMetrics() map[string]int64 {
+	return map[string]int64{
+		"gets":        atomic.LoadInt64(&p.gets),
+		"puts":        atomic.LoadInt64(&p.puts),
+		"misses":      atomic.LoadInt64(&p.misses),
+		"allocations": atomic.LoadInt64(&p.allocations),
+	}
+}
+
+// Global buffer pool
+var globalBufferPool = newTieredBufferPool()
+
+// GetBuffer gets a byte buffer from the global pool.
+func GetBuffer(capacity int) []byte {
+	return globalBufferPool.Get(capacity)
+}
+
+// PutBuffer returns a byte buffer to the global pool.
+func PutBuffer(buf []byte) {
+	globalBufferPool.Put(buf)
+}
+
+// GetBufferPoolMetrics returns the global buffer pool metrics.
+func GetBufferPoolMetrics() map[string]int64 {
+	return globalBufferPool.GetMetrics()
+}CONTENT_END
+
+
+=== File: field.go ===
+FILE_PATH: field.go
+FILE_SIZE: 4446 bytes
+CONTENT_BEGIN
+package onelog
+
+import (
+	"fmt"
+	"time"
+)
+
+// FieldType represents the type of a field.
+type FieldType uint8
+
+// Field types.
+const (
+	// UnknownType is the default field type.
+	UnknownType FieldType = iota
+	// BoolType is a boolean field type.
+	BoolType
+	// IntType is an int field type.
+	IntType
+	// Int64Type is an int64 field type.
+	Int64Type
+	// UintType is a uint field type.
+	UintType
+	// Uint64Type is a uint64 field type.
+	Uint64Type
+	// Float32Type is a float32 field type.
+	Float32Type
+	// Float64Type is a float64 field type.
+	Float64Type
+	// StringType is a string field type.
+	StringType
+	// TimeType is a time.Time field type.
+	TimeType
+	// DurationType is a time.Duration field type.
+	DurationType
+	// ErrorType is an error field type.
+	ErrorType
+	// ObjectType is a structured object field type.
+	ObjectType
+	// ArrayType is an array field type.
+	ArrayType
+	// BinaryType is a []byte field type.
+	BinaryType
+)
+
+// Field represents a structured log field.
+type Field struct {
+	Key         string
+	Type        FieldType
+	Integer     int64
+	Float       float64
+	String      string
+	Interface   interface{}
+	IsSensitive bool // Renamed from Sensitive to avoid collision with method
+}
+
+// Bool creates a Field with a boolean value.
+func Bool(key string, val bool) Field {
+	var i int64
+	if val {
+		i = 1
+	}
+	return Field{
+		Key:     key,
+		Type:    BoolType,
+		Integer: i,
+	}
+}
+
+// Int creates a Field with an int value.
+func Int(key string, val int) Field {
+	return Field{
+		Key:     key,
+		Type:    IntType,
+		Integer: int64(val),
+	}
+}
+
+// Int64 creates a Field with an int64 value.
+func Int64(key string, val int64) Field {
+	return Field{
+		Key:     key,
+		Type:    Int64Type,
+		Integer: val,
+	}
+}
+
+// Uint creates a Field with a uint value.
+func Uint(key string, val uint) Field {
+	return Field{
+		Key:     key,
+		Type:    UintType,
+		Integer: int64(val),
+	}
+}
+
+// Uint64 creates a Field with a uint64 value.
+func Uint64(key string, val uint64) Field {
+	return Field{
+		Key:     key,
+		Type:    Uint64Type,
+		Integer: int64(val),
+	}
+}
+
+// Float32 creates a Field with a float32 value.
+func Float32(key string, val float32) Field {
+	return Field{
+		Key:     key,
+		Type:    Float32Type,
+		Float:   float64(val),
+	}
+}
+
+// Float64 creates a Field with a float64 value.
+func Float64(key string, val float64) Field {
+	return Field{
+		Key:     key,
+		Type:    Float64Type,
+		Float:   val,
+	}
+}
+
+// Str creates a Field with a string value.
+func Str(key string, val string) Field {
+	return Field{
+		Key:    key,
+		Type:   StringType,
+		String: val,
+	}
+}
+
+// Time creates a Field with a time.Time value.
+func Time(key string, val time.Time) Field {
+	return Field{
+		Key:       key,
+		Type:      TimeType,
+		Interface: val,
+	}
+}
+
+// Duration creates a Field with a time.Duration value.
+func Duration(key string, val time.Duration) Field {
+	return Field{
+		Key:       key,
+		Type:      DurationType,
+		Interface: val,
+	}
+}
+
+// Err creates a Field with an error value.
+func Err(err error) Field {
+	if err == nil {
+		return Field{
+			Key:    "error",
+			Type:   ErrorType,
+			String: "",
+		}
+	}
+	return Field{
+		Key:       "error",
+		Type:      ErrorType,
+		Interface: err,
+		String:    err.Error(),
+	}
+}
+
+// NamedErr creates a Field with a named error value.
+func NamedErr(key string, err error) Field {
+	if err == nil {
+		return Field{
+			Key:    key,
+			Type:   ErrorType,
+			String: "",
+		}
+	}
+	return Field{
+		Key:       key,
+		Type:      ErrorType,
+		Interface: err,
+		String:    err.Error(),
+	}
+}
+
+// Any creates a Field with an interface{} value.
+func Any(key string, val interface{}) Field {
+	return Field{
+		Key:       key,
+		Type:      ObjectType,
+		Interface: val,
+	}
+}
+
+// Binary creates a Field with a []byte value.
+func Binary(key string, val []byte) Field {
+	return Field{
+		Key:       key,
+		Type:      BinaryType,
+		Interface: val,
+	}
+}
+
+// Array creates a Field with an array value.
+func Array(key string, val interface{}) Field {
+	return Field{
+		Key:       key,
+		Type:      ArrayType,
+		Interface: val,
+	}
+}
+
+// Sensitive marks a field as sensitive, which will be redacted in logs.
+func (f Field) Sensitive() Field {
+	newField := f
+	newField.IsSensitive = true
+	return newField
+}
+
+// GoString implements fmt.GoStringer.
+func (f Field) GoString() string {
+	return fmt.Sprintf("onelog.Field{Key: %q, Type: %v, Integer: %d, Float: %f, String: %q, Interface: %v}",
+		f.Key, f.Type, f.Integer, f.Float, f.String, f.Interface)
+}CONTENT_END
+
+
+=== File: colors.go ===
+FILE_PATH: colors.go
+FILE_SIZE: 8136 bytes
+CONTENT_BEGIN
+package onelog
+
+import (
+	"fmt"
+	"os"
+	"runtime"
+	"strings"
+)
+
+const (
+	// Reset resets the foreground and background colors.
+	reset = "\033[0m"
+	// Bold makes the foreground bold.
+	bold = "\033[1m"
+	// Underline underlines the foreground.
+	underline = "\033[4m"
+	// Blink makes the foreground blink.
+	blink = "\033[5m"
+	// Reverse reverses the foreground and background colors.
+	reverse = "\033[7m"
+	// Hidden hides the foreground.
+	hidden = "\033[8m"
+
+	// Black is the black foreground color.
+	black = "\033[30m"
+	// Red is the red foreground color.
+	red = "\033[31m"
+	// Green is the green foreground color.
+	green = "\033[32m"
+	// Yellow is the yellow foreground color.
+	yellow = "\033[33m"
+	// Blue is the blue foreground color.
+	blue = "\033[34m"
+	// Magenta is the magenta foreground color.
+	magenta = "\033[35m"
+	// Cyan is the cyan foreground color.
+	cyan = "\033[36m"
+	// White is the white foreground color.
+	white = "\033[37m"
+
+	// BrightBlack is the bright black foreground color.
+	brightBlack = "\033[90m"
+	// BrightRed is the bright red foreground color.
+	brightRed = "\033[91m"
+	// BrightGreen is the bright green foreground color.
+	brightGreen = "\033[92m"
+	// BrightYellow is the bright yellow foreground color.
+	brightYellow = "\033[93m"
+	// BrightBlue is the bright blue foreground color.
+	brightBlue = "\033[94m"
+	// BrightMagenta is the bright magenta foreground color.
+	brightMagenta = "\033[95m"
+	// BrightCyan is the bright cyan foreground color.
+	brightCyan = "\033[96m"
+	// BrightWhite is the bright white foreground color.
+	brightWhite = "\033[97m"
+
+	// BgBlack is the black background color.
+	bgBlack = "\033[40m"
+	// BgRed is the red background color.
+	bgRed = "\033[41m"
+	// BgGreen is the green background color.
+	bgGreen = "\033[42m"
+	// BgYellow is the yellow background color.
+	bgYellow = "\033[43m"
+	// BgBlue is the blue background color.
+	bgBlue = "\033[44m"
+	// BgMagenta is the magenta background color.
+	bgMagenta = "\033[45m"
+	// BgCyan is the cyan background color.
+	bgCyan = "\033[46m"
+	// BgWhite is the white background color.
+	bgWhite = "\033[47m"
+
+	// BgBrightBlack is the bright black background color.
+	bgBrightBlack = "\033[100m"
+	// BgBrightRed is the bright red background color.
+	bgBrightRed = "\033[101m"
+	// BgBrightGreen is the bright green background color.
+	bgBrightGreen = "\033[102m"
+	// BgBrightYellow is the bright yellow background color.
+	bgBrightYellow = "\033[103m"
+	// BgBrightBlue is the bright blue background color.
+	bgBrightBlue = "\033[104m"
+	// BgBrightMagenta is the bright magenta background color.
+	bgBrightMagenta = "\033[105m"
+	// BgBrightCyan is the bright cyan background color.
+	bgBrightCyan = "\033[106m"
+	// BgBrightWhite is the bright white background color.
+	bgBrightWhite = "\033[107m"
+)
+
+// Colors for log levels.
+var (
+	// Default colors
+	traceColor = cyan
+	debugColor = blue
+	infoColor  = green
+	warnColor  = yellow
+	errorColor = red
+	fatalColor = brightRed
+
+	// Special colors
+	resetColor   = reset
+	keyColor     = cyan
+	stringColor  = green
+	numberColor  = magenta
+	boolColor    = yellow
+	timeColor    = blue
+	errorStrColor = red
+	defaultColor = white
+
+	// Whether colors are enabled
+	colorsEnabled = false
+)
+
+// init initializes the colors.
+func init() {
+	// Check if colors should be enabled
+	colorsEnabled = checkColorsEnabled()
+}
+
+// checkColorsEnabled checks if colors should be enabled.
+func checkColorsEnabled() bool {
+	// If on Windows, check if the terminal supports ANSI colors
+	if runtime.GOOS == "windows" {
+		// Check for ANSICON, TERM, CI environment variables
+		_, hasAnsicon := os.LookupEnv("ANSICON")
+		term, hasTerm := os.LookupEnv("TERM")
+		_, hasCI := os.LookupEnv("CI")
+
+		// Enable colors if any of these conditions are met
+		return hasAnsicon || hasTerm && term != "dumb" || hasCI
+	}
+
+	// On other platforms, check if stdout is a terminal
+	fileInfo, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+
+	// Enable colors if stdout is a terminal
+	return (fileInfo.Mode() & os.ModeCharDevice) != 0
+}
+
+// SetColorsEnabled sets whether colors are enabled.
+func SetColorsEnabled(enabled bool) {
+	colorsEnabled = enabled
+}
+
+// EnableColors enables colors.
+func EnableColors() {
+	colorsEnabled = true
+}
+
+// DisableColors disables colors.
+func DisableColors() {
+	colorsEnabled = false
+}
+
+// getColorForLevel returns the ANSI color for the given log level.
+func getColorForLevel(level Level) string {
+	if !colorsEnabled {
+		return ""
+	}
+
+	switch level {
+	case TraceLevel:
+		return traceColor
+	case DebugLevel:
+		return debugColor
+	case InfoLevel:
+		return infoColor
+	case WarnLevel:
+		return warnColor
+	case ErrorLevel:
+		return errorColor
+	case FatalLevel:
+		return fatalColor
+	default:
+		return defaultColor
+	}
+}
+
+// Color is a type for ANSI colors.
+type Color string
+
+// SetLevelColor sets the color for the given log level.
+func SetLevelColor(level Level, color Color) {
+	switch level {
+	case TraceLevel:
+		traceColor = string(color)
+	case DebugLevel:
+		debugColor = string(color)
+	case InfoLevel:
+		infoColor = string(color)
+	case WarnLevel:
+		warnColor = string(color)
+	case ErrorLevel:
+		errorColor = string(color)
+	case FatalLevel:
+		fatalColor = string(color)
+	}
+}
+
+// SetKeyColor sets the color for field keys.
+func SetKeyColor(color Color) {
+	keyColor = string(color)
+}
+
+// SetStringColor sets the color for string values.
+func SetStringColor(color Color) {
+	stringColor = string(color)
+}
+
+// SetNumberColor sets the color for number values.
+func SetNumberColor(color Color) {
+	numberColor = string(color)
+}
+
+// SetBoolColor sets the color for boolean values.
+func SetBoolColor(color Color) {
+	boolColor = string(color)
+}
+
+// SetTimeColor sets the color for time values.
+func SetTimeColor(color Color) {
+	timeColor = string(color)
+}
+
+// SetErrorColor sets the color for error values.
+func SetErrorColor(color Color) {
+	errorStrColor = string(color)
+}
+
+// SetDefaultColor sets the color for other values.
+func SetDefaultColor(color Color) {
+	defaultColor = string(color)
+}
+
+// RGB creates a custom RGB color.
+func RGB(r, g, b int) Color {
+	return Color(fmt.Sprintf("\033[38;2;%d;%d;%dm", r, g, b))
+}
+
+// BgRGB creates a custom RGB background color.
+func BgRGB(r, g, b int) Color {
+	return Color(fmt.Sprintf("\033[48;2;%d;%d;%dm", r, g, b))
+}
+
+// Xterm256 creates a color using the xterm 256 color palette.
+func Xterm256(code int) Color {
+	return Color(fmt.Sprintf("\033[38;5;%dm", code))
+}
+
+// BgXterm256 creates a background color using the xterm 256 color palette.
+func BgXterm256(code int) Color {
+	return Color(fmt.Sprintf("\033[48;5;%dm", code))
+}
+
+// Combine combines multiple colors.
+func Combine(colors ...Color) Color {
+	var combined strings.Builder
+	for _, color := range colors {
+		combined.WriteString(string(color))
+	}
+	return Color(combined.String())
+}
+
+// Colors available for use.
+var (
+	Reset          = Color(reset)
+	Bold           = Color(bold)
+	Underline      = Color(underline)
+	Blink          = Color(blink)
+	Reverse        = Color(reverse)
+	Hidden         = Color(hidden)
+	Black          = Color(black)
+	Red            = Color(red)
+	Green          = Color(green)
+	Yellow         = Color(yellow)
+	Blue           = Color(blue)
+	Magenta        = Color(magenta)
+	Cyan           = Color(cyan)
+	White          = Color(white)
+	BrightBlack    = Color(brightBlack)
+	BrightRed      = Color(brightRed)
+	BrightGreen    = Color(brightGreen)
+	BrightYellow   = Color(brightYellow)
+	BrightBlue     = Color(brightBlue)
+	BrightMagenta  = Color(brightMagenta)
+	BrightCyan     = Color(brightCyan)
+	BrightWhite    = Color(brightWhite)
+	BgBlack        = Color(bgBlack)
+	BgRed          = Color(bgRed)
+	BgGreen        = Color(bgGreen)
+	BgYellow       = Color(bgYellow)
+	BgBlue         = Color(bgBlue)
+	BgMagenta      = Color(bgMagenta)
+	BgCyan         = Color(bgCyan)
+	BgWhite        = Color(bgWhite)
+	BgBrightBlack  = Color(bgBrightBlack)
+	BgBrightRed    = Color(bgBrightRed)
+	BgBrightGreen  = Color(bgBrightGreen)
+	BgBrightYellow = Color(bgBrightYellow)
+	BgBrightBlue   = Color(bgBrightBlue)
+	BgBrightMagenta = Color(bgBrightMagenta)
+	BgBrightCyan   = Color(bgBrightCyan)
+	BgBrightWhite  = Color(bgBrightWhite)
+)CONTENT_END
+
+
+=== File: config.go ===
+FILE_PATH: config.go
+FILE_SIZE: 6017 bytes
+CONTENT_BEGIN
+// Package onelog provides a high-performance, structured logging package
+// optimized for speed, low memory allocation, and high throughput.
+package onelog
+
+import (
+	"io"
+	"os"
+	"time"
+)
+
+// Config contains the configuration for a logger.
+type Config struct {
+	// Level is the minimum log level.
+	Level Level
+	// Formatter is the log formatter.
+	Formatter Formatter
+	// Writer is the log writer.
+	Writer io.Writer
+	// ErrorHandler is called when an error occurs.
+	ErrorHandler func(error)
+	// EnableCaller enables caller information.
+	EnableCaller bool
+	// CallerSkip is the number of stack frames to skip when getting caller info.
+	CallerSkip int
+	// EnableAsync enables asynchronous logging.
+	EnableAsync bool
+	// AsyncBufferSize is the size of the async buffer.
+	AsyncBufferSize int
+	// BackpressureMode is the mode for handling backpressure.
+	BackpressureMode BackpressureMode
+	// EnableSampling enables log sampling.
+	EnableSampling bool
+	// Sampler is the log sampler.
+	Sampler Sampler
+	// Hooks are functions called for each log entry.
+	Hooks []Hook
+	// RedactSensitiveFields enables redaction of sensitive fields.
+	RedactSensitiveFields bool
+	// AdditionalSensitiveKeys are additional keys to redact.
+	AdditionalSensitiveKeys []string
+	// EnableDynamicBufferResizing enables dynamic buffer resizing.
+	EnableDynamicBufferResizing bool
+	// BufferResizeThreshold is the buffer utilization threshold for resizing.
+	BufferResizeThreshold int
+	// FlushInterval is the interval for flushing the async buffer.
+	FlushInterval time.Duration
+}
+
+// Option is a function that configures a Config.
+type Option func(*Config)
+
+// WithLevel sets the log level.
+func WithLevel(level Level) Option {
+	return func(c *Config) {
+		c.Level = level
+	}
+}
+
+// WithFormatter sets the log formatter.
+func WithFormatter(formatter Formatter) Option {
+	return func(c *Config) {
+		c.Formatter = formatter
+	}
+}
+
+// WithWriter sets the log writer.
+func WithWriter(writer io.Writer) Option {
+	return func(c *Config) {
+		c.Writer = writer
+	}
+}
+
+// WithErrorHandler sets the error handler.
+func WithErrorHandler(handler func(error)) Option {
+	return func(c *Config) {
+		c.ErrorHandler = handler
+	}
+}
+
+// WithCaller enables caller information.
+func WithCaller(enabled bool) Option {
+	return func(c *Config) {
+		c.EnableCaller = enabled
+	}
+}
+
+// WithCallerSkip sets the number of stack frames to skip.
+func WithCallerSkip(skip int) Option {
+	return func(c *Config) {
+		c.CallerSkip = skip
+	}
+}
+
+// WithAsync enables asynchronous logging.
+func WithAsync(enabled bool) Option {
+	return func(c *Config) {
+		c.EnableAsync = enabled
+	}
+}
+
+// WithAsyncBufferSize sets the async buffer size.
+func WithAsyncBufferSize(size int) Option {
+	return func(c *Config) {
+		c.AsyncBufferSize = size
+	}
+}
+
+// WithBackpressureMode sets the backpressure mode.
+func WithBackpressureMode(mode BackpressureMode) Option {
+	return func(c *Config) {
+		c.BackpressureMode = mode
+	}
+}
+
+// WithSampling enables log sampling.
+func WithSampling(enabled bool) Option {
+	return func(c *Config) {
+		c.EnableSampling = enabled
+	}
+}
+
+// WithSampler sets the log sampler.
+func WithSampler(sampler Sampler) Option {
+	return func(c *Config) {
+		c.Sampler = sampler
+	}
+}
+
+// WithHooks sets the log hooks.
+func WithHooks(hooks ...Hook) Option {
+	return func(c *Config) {
+		c.Hooks = hooks
+	}
+}
+
+// WithRedactSensitiveFields enables redaction of sensitive fields.
+func WithRedactSensitiveFields(enabled bool) Option {
+	return func(c *Config) {
+		c.RedactSensitiveFields = enabled
+	}
+}
+
+// WithAdditionalSensitiveKeys sets additional keys to redact.
+func WithAdditionalSensitiveKeys(keys ...string) Option {
+	return func(c *Config) {
+		c.AdditionalSensitiveKeys = keys
+	}
+}
+
+// WithDynamicBufferResizing enables dynamic buffer resizing.
+func WithDynamicBufferResizing(enabled bool) Option {
+	return func(c *Config) {
+		c.EnableDynamicBufferResizing = enabled
+	}
+}
+
+// WithBufferResizeThreshold sets the buffer utilization threshold for resizing.
+func WithBufferResizeThreshold(threshold int) Option {
+	return func(c *Config) {
+		c.BufferResizeThreshold = threshold
+	}
+}
+
+// WithFlushInterval sets the interval for flushing the async buffer.
+func WithFlushInterval(interval time.Duration) Option {
+	return func(c *Config) {
+		c.FlushInterval = interval
+	}
+}
+
+// DefaultConfig returns the default configuration.
+func DefaultConfig() *Config {
+	return &Config{
+		Level:                    InfoLevel,
+		Formatter:                NewTextFormatter(),
+		Writer:                   os.Stdout,
+		ErrorHandler:             nil,
+		EnableCaller:             false,
+		CallerSkip:               0,
+		EnableAsync:              false,
+		AsyncBufferSize:          8192,
+		BackpressureMode:         DropMode,
+		EnableSampling:           false,
+		Sampler:                  nil,
+		Hooks:                    nil,
+		RedactSensitiveFields:    true,
+		AdditionalSensitiveKeys:  nil,
+		EnableDynamicBufferResizing: true,
+		BufferResizeThreshold:    75,
+		FlushInterval:            100 * time.Millisecond,
+	}
+}
+
+// NewConfig creates a new configuration with the given options.
+func NewConfig(options ...Option) *Config {
+	config := DefaultConfig()
+	
+	for _, option := range options {
+		option(config)
+	}
+	
+	return config
+}
+
+// ApplyOptions applies the given options to the configuration.
+func (c *Config) ApplyOptions(options ...Option) {
+	for _, option := range options {
+		option(c)
+	}
+}
+
+// Validate validates the configuration.
+func (c *Config) Validate() error {
+	if c.Formatter == nil {
+		return ErrInvalidFormatter
+	}
+	
+	if c.Writer == nil {
+		return ErrInvalidWriter
+	}
+	
+	return nil
+}
+
+// Clone creates a copy of the configuration.
+func (c *Config) Clone() *Config {
+	clone := *c
+	
+	// Deep copy slices
+	if c.Hooks != nil {
+		clone.Hooks = make([]Hook, len(c.Hooks))
+		copy(clone.Hooks, c.Hooks)
+	}
+	
+	if c.AdditionalSensitiveKeys != nil {
+		clone.AdditionalSensitiveKeys = make([]string, len(c.AdditionalSensitiveKeys))
+		copy(clone.AdditionalSensitiveKeys, c.AdditionalSensitiveKeys)
+	}
+	
+	return &clone
+}CONTENT_END
+
+
+=== File: entry.go ===
+FILE_PATH: entry.go
+FILE_SIZE: 8093 bytes
+CONTENT_BEGIN
+package onelog
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"time"
+)
+
+// Entry represents a log entry with fields.
+type Entry struct {
+	logger     *Logger
+	level      Level
+	time       time.Time
+	message    string
+	fields     []Field
+	fieldPool  *fieldPool
+	ctx        context.Context
+	callerInfo *CallerInfo
+}
+
+// CallerInfo contains information about the caller of the log function.
+type CallerInfo struct {
+	File     string
+	Line     int
+	Function string
+}
+
+// newEntry creates a new Entry.
+func (l *Logger) newEntry() *Entry {
+	e := entryPool.Get().(*Entry)
+	e.logger = l
+	e.time = time.Now()
+	e.fields = e.fields[:0] // Reset fields slice
+	e.fieldPool = l.fieldPool
+	e.ctx = nil
+	e.callerInfo = nil
+	return e
+}
+
+// Enabled returns whether the given level is enabled.
+func (e *Entry) Enabled() bool {
+	return e.level >= e.logger.level.Level()
+}
+
+// WithField adds a field to the entry.
+func (e *Entry) WithField(field Field) *Entry {
+	e.fields = append(e.fields, field)
+	return e
+}
+
+// WithFields adds multiple fields to the entry.
+func (e *Entry) WithFields(fields []Field) *Entry {
+	e.fields = append(e.fields, fields...)
+	return e
+}
+
+// WithContext adds a context to the entry.
+func (e *Entry) WithContext(ctx context.Context) *Entry {
+	e.ctx = ctx
+	return e
+}
+
+// Context returns the entry's context or context.Background() if nil.
+func (e *Entry) Context() context.Context {
+	if e.ctx == nil {
+		return context.Background()
+	}
+	return e.ctx
+}
+
+// Str adds a string field to the entry.
+func (e *Entry) Str(key, val string) *Entry {
+	e.fields = append(e.fields, Str(key, val))
+	return e
+}
+
+// Bool adds a boolean field to the entry.
+func (e *Entry) Bool(key string, val bool) *Entry {
+	e.fields = append(e.fields, Bool(key, val))
+	return e
+}
+
+// Int adds an int field to the entry.
+func (e *Entry) Int(key string, val int) *Entry {
+	e.fields = append(e.fields, Int(key, val))
+	return e
+}
+
+// Int64 adds an int64 field to the entry.
+func (e *Entry) Int64(key string, val int64) *Entry {
+	e.fields = append(e.fields, Int64(key, val))
+	return e
+}
+
+// Uint adds a uint field to the entry.
+func (e *Entry) Uint(key string, val uint) *Entry {
+	e.fields = append(e.fields, Uint(key, val))
+	return e
+}
+
+// Uint64 adds a uint64 field to the entry.
+func (e *Entry) Uint64(key string, val uint64) *Entry {
+	e.fields = append(e.fields, Uint64(key, val))
+	return e
+}
+
+// Float32 adds a float32 field to the entry.
+func (e *Entry) Float32(key string, val float32) *Entry {
+	e.fields = append(e.fields, Float32(key, val))
+	return e
+}
+
+// Float64 adds a float64 field to the entry.
+func (e *Entry) Float64(key string, val float64) *Entry {
+	e.fields = append(e.fields, Float64(key, val))
+	return e
+}
+
+// Time adds a time.Time field to the entry.
+func (e *Entry) Time(key string, val time.Time) *Entry {
+	e.fields = append(e.fields, Time(key, val))
+	return e
+}
+
+// Duration adds a time.Duration field to the entry.
+func (e *Entry) Duration(key string, val time.Duration) *Entry {
+	e.fields = append(e.fields, Duration(key, val))
+	return e
+}
+
+// Err adds an error field to the entry.
+func (e *Entry) Err(err error) *Entry {
+	e.fields = append(e.fields, Err(err))
+	return e
+}
+
+// NamedErr adds a named error field to the entry.
+func (e *Entry) NamedErr(key string, err error) *Entry {
+	e.fields = append(e.fields, NamedErr(key, err))
+	return e
+}
+
+// Any adds an interface{} field to the entry.
+func (e *Entry) Any(key string, val interface{}) *Entry {
+	e.fields = append(e.fields, Any(key, val))
+	return e
+}
+
+// Binary adds a []byte field to the entry.
+func (e *Entry) Binary(key string, val []byte) *Entry {
+	e.fields = append(e.fields, Binary(key, val))
+	return e
+}
+
+// Array adds an array field to the entry.
+func (e *Entry) Array(key string, val interface{}) *Entry {
+	e.fields = append(e.fields, Array(key, val))
+	return e
+}
+
+// Trace logs a message at the trace level.
+func (e *Entry) Trace(msg string) {
+	if !e.logger.level.Enabled(TraceLevel) {
+		e.release()
+		return
+	}
+	e.level = TraceLevel
+	e.message = msg
+	e.write()
+}
+
+// Debug logs a message at the debug level.
+func (e *Entry) Debug(msg string) {
+	if !e.logger.level.Enabled(DebugLevel) {
+		e.release()
+		return
+	}
+	e.level = DebugLevel
+	e.message = msg
+	e.write()
+}
+
+// Info logs a message at the info level.
+func (e *Entry) Info(msg string) {
+	if !e.logger.level.Enabled(InfoLevel) {
+		e.release()
+		return
+	}
+	e.level = InfoLevel
+	e.message = msg
+	e.write()
+}
+
+// Warn logs a message at the warn level.
+func (e *Entry) Warn(msg string) {
+	if !e.logger.level.Enabled(WarnLevel) {
+		e.release()
+		return
+	}
+	e.level = WarnLevel
+	e.message = msg
+	e.write()
+}
+
+// Error logs a message at the error level.
+func (e *Entry) Error(msg string) {
+	if !e.logger.level.Enabled(ErrorLevel) {
+		e.release()
+		return
+	}
+	e.level = ErrorLevel
+	e.message = msg
+	e.write()
+}
+
+// Fatal logs a message at the fatal level and calls os.Exit(1).
+func (e *Entry) Fatal(msg string) {
+	if !e.logger.level.Enabled(FatalLevel) {
+		e.release()
+		return
+	}
+	e.level = FatalLevel
+	e.message = msg
+	e.write()
+	exit(1)
+}
+
+// Tracef logs a formatted message at the trace level.
+func (e *Entry) Tracef(format string, args ...interface{}) {
+	if !e.logger.level.Enabled(TraceLevel) {
+		e.release()
+		return
+	}
+	e.level = TraceLevel
+	e.message = fmt.Sprintf(format, args...)
+	e.write()
+}
+
+// Debugf logs a formatted message at the debug level.
+func (e *Entry) Debugf(format string, args ...interface{}) {
+	if !e.logger.level.Enabled(DebugLevel) {
+		e.release()
+		return
+	}
+	e.level = DebugLevel
+	e.message = fmt.Sprintf(format, args...)
+	e.write()
+}
+
+// Infof logs a formatted message at the info level.
+func (e *Entry) Infof(format string, args ...interface{}) {
+	if !e.logger.level.Enabled(InfoLevel) {
+		e.release()
+		return
+	}
+	e.level = InfoLevel
+	e.message = fmt.Sprintf(format, args...)
+	e.write()
+}
+
+// Warnf logs a formatted message at the warn level.
+func (e *Entry) Warnf(format string, args ...interface{}) {
+	if !e.logger.level.Enabled(WarnLevel) {
+		e.release()
+		return
+	}
+	e.level = WarnLevel
+	e.message = fmt.Sprintf(format, args...)
+	e.write()
+}
+
+// Errorf logs a formatted message at the error level.
+func (e *Entry) Errorf(format string, args ...interface{}) {
+	if !e.logger.level.Enabled(ErrorLevel) {
+		e.release()
+		return
+	}
+	e.level = ErrorLevel
+	e.message = fmt.Sprintf(format, args...)
+	e.write()
+}
+
+// Fatalf logs a formatted message at the fatal level and calls os.Exit(1).
+func (e *Entry) Fatalf(format string, args ...interface{}) {
+	if !e.logger.level.Enabled(FatalLevel) {
+		e.release()
+		return
+	}
+	e.level = FatalLevel
+	e.message = fmt.Sprintf(format, args...)
+	e.write()
+	exit(1)
+}
+
+// write writes the entry to the logger's writer.
+func (e *Entry) write() {
+	// If sampling is enabled, check if the entry should be sampled.
+	if e.logger.sampler != nil && !e.logger.sampler.Sample(e) {
+		e.release()
+		return
+	}
+
+	// If caller info is enabled, get the caller info.
+	if e.logger.enableCaller {
+		e.callerInfo = getCaller(2)
+	}
+
+	// Format and write the entry.
+	buf := bufferPool.Get().(*bytes.Buffer)
+	defer bufferPool.Put(buf)
+
+	if err := e.logger.formatter.Format(buf, e); err != nil {
+		// Handle formatting error
+		if e.logger.errorHandler != nil {
+			e.logger.errorHandler(err)
+		}
+		e.release()
+		return
+	}
+
+	// Write the entry to the writer.
+	if e.logger.EnableAsync {
+		e.logger.writeAsync(buf.Bytes())
+	} else {
+		if _, err := e.logger.writer.Write(buf.Bytes()); err != nil {
+			if e.logger.errorHandler != nil {
+				e.logger.errorHandler(err)
+			}
+		}
+	}
+
+	e.release()
+}
+
+// release returns the entry to the pool.
+func (e *Entry) release() {
+	entryPool.Put(e)
+}
+
+// Writer returns an io.Writer that writes to the entry at the given level.
+func (e *Entry) Writer(level Level) io.Writer {
+	return &entryWriter{
+		entry: e,
+		level: level,
+	}
+}
+
+// entryWriter is an io.Writer that writes to an entry.
+type entryWriter struct {
+	entry *Entry
+	level Level
+}
+
+// Write implements io.Writer.
+func (w *entryWriter) Write(p []byte) (int, error) {
+	w.entry.level = w.level
+	w.entry.message = string(p)
+	w.entry.write()
+	return len(p), nil
+}CONTENT_END
+
+
+=== File: writer.go ===
+FILE_PATH: writer.go
+FILE_SIZE: 7490 bytes
+CONTENT_BEGIN
+package onelog
+
+import (
+	"compress/gzip"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+)
+
+// LogWriter is an interface for log writers.
+type LogWriter interface {
+	io.Writer
+	// Close closes the writer.
+	Close() error
+}
+
+// ConsoleWriter writes logs to the console.
+type ConsoleWriter struct {
+	out io.Writer
+}
+
+// NewConsoleWriter creates a new ConsoleWriter.
+func NewConsoleWriter() *ConsoleWriter {
+	return &ConsoleWriter{
+		out: os.Stdout,
+	}
+}
+
+// Write implements io.Writer.
+func (w *ConsoleWriter) Write(p []byte) (n int, err error) {
+	return w.out.Write(p)
+}
+
+// Close implements LogWriter.
+func (w *ConsoleWriter) Close() error {
+	return nil
+}
+
+// SetOutput sets the output writer.
+func (w *ConsoleWriter) SetOutput(out io.Writer) {
+	w.out = out
+}
+
+// FileWriter writes logs to a file.
+type FileWriter struct {
+	filename  string
+	file      *os.File
+	mu        sync.Mutex
+	maxSize   int64
+	maxAge    time.Duration
+	maxBackups int
+	compress  bool
+	size      int64
+}
+
+// FileInfo represents information about a log file.
+type FileInfo struct {
+	name       string
+	time       time.Time
+	compressed bool
+}
+
+// FileWriterOption is a function that configures a FileWriter.
+type FileWriterOption func(*FileWriter)
+
+// WithMaxSize sets the maximum size of the log file before it gets rotated.
+func WithMaxSize(maxSize int64) FileWriterOption {
+	return func(w *FileWriter) {
+		w.maxSize = maxSize
+	}
+}
+
+// WithMaxAge sets the maximum age of a log file before it gets deleted.
+func WithMaxAge(maxAge time.Duration) FileWriterOption {
+	return func(w *FileWriter) {
+		w.maxAge = maxAge
+	}
+}
+
+// WithMaxBackups sets the maximum number of old log files to retain.
+func WithMaxBackups(maxBackups int) FileWriterOption {
+	return func(w *FileWriter) {
+		w.maxBackups = maxBackups
+	}
+}
+
+// WithCompress enables compression of rotated log files.
+func WithCompress(compress bool) FileWriterOption {
+	return func(w *FileWriter) {
+		w.compress = compress
+	}
+}
+
+// NewFileWriter creates a new FileWriter.
+func NewFileWriter(filename string, options ...FileWriterOption) (*FileWriter, error) {
+	w := &FileWriter{
+		filename:   filename,
+		maxSize:    100 * 1024 * 1024, // 100 MB
+		maxAge:     7 * 24 * time.Hour, // 7 days
+		maxBackups: 5,
+		compress:   true,
+	}
+	
+	for _, option := range options {
+		option(w)
+	}
+	
+	if err := w.openFile(); err != nil {
+		return nil, err
+	}
+	
+	return w, nil
+}
+
+// openFile opens the log file.
+func (w *FileWriter) openFile() error {
+	// Create the directory if it doesn't exist
+	dir := filepath.Dir(w.filename)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	
+	// Open the file for appending
+	f, err := os.OpenFile(w.filename, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return err
+	}
+	
+	// Get the file size
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return err
+	}
+	
+	w.file = f
+	w.size = info.Size()
+	
+	return nil
+}
+
+// Write implements io.Writer.
+func (w *FileWriter) Write(p []byte) (n int, err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	
+	if w.file == nil {
+		if err := w.openFile(); err != nil {
+			return 0, err
+		}
+	}
+	
+	// Check if the file needs to be rotated
+	if w.maxSize > 0 && w.size+int64(len(p)) > w.maxSize {
+		if err := w.rotate(); err != nil {
+			return 0, err
+		}
+	}
+	
+	n, err = w.file.Write(p)
+	w.size += int64(n)
+	
+	return n, err
+}
+
+// Close implements LogWriter.
+func (w *FileWriter) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	
+	if w.file == nil {
+		return nil
+	}
+	
+	err := w.file.Close()
+	w.file = nil
+	
+	return err
+}
+
+// rotate rotates the log file.
+func (w *FileWriter) rotate() error {
+	// Close the current file
+	if err := w.file.Close(); err != nil {
+		return err
+	}
+	
+	// Get the current time
+	now := time.Now()
+	
+	// Rotate the file
+	rotatedName := fmt.Sprintf("%s.%s", w.filename, now.Format("2006-01-02-15-04-05"))
+	if err := os.Rename(w.filename, rotatedName); err != nil {
+		return err
+	}
+	
+	// Compress the rotated file if enabled
+	if w.compress {
+		go func(name string) {
+			if err := compressFile(name); err != nil {
+				// Handle compression error
+			}
+		}(rotatedName)
+	}
+	
+	// Open a new file
+	if err := w.openFile(); err != nil {
+		return err
+	}
+	
+	// Clean up old log files
+	go w.cleanup(now)
+	
+	return nil
+}
+
+// cleanup deletes old log files.
+func (w *FileWriter) cleanup(now time.Time) {
+	pattern := fmt.Sprintf("%s.*", w.filename)
+	files, err := filepath.Glob(pattern)
+	if err != nil {
+		return
+	}
+	
+	var logs []FileInfo
+	
+	// Collect information about log files
+	for _, file := range files {
+		// Skip compressed files when collecting for age-based cleanup
+		compressed := filepath.Ext(file) == ".gz"
+		
+		// Get the file modification time
+		info, err := os.Stat(file)
+		if err != nil {
+			continue
+		}
+		
+		logs = append(logs, FileInfo{
+			name:       file,
+			time:       info.ModTime(),
+			compressed: compressed,
+		})
+	}
+	
+	// Delete old log files based on age
+	if w.maxAge > 0 {
+		cutoff := now.Add(-w.maxAge)
+		for _, log := range logs {
+			if log.time.Before(cutoff) {
+				os.Remove(log.name)
+			}
+		}
+	}
+	
+	// Delete old log files based on count
+	if w.maxBackups > 0 && len(logs) > w.maxBackups {
+		// Sort the logs by time (oldest first)
+		sortLogsByTime(logs)
+		
+		// Delete the oldest logs
+		for i := 0; i < len(logs)-w.maxBackups; i++ {
+			os.Remove(logs[i].name)
+		}
+	}
+}
+
+// sortLogsByTime sorts logs by time (oldest first).
+func sortLogsByTime(logs []FileInfo) {
+	for i := 0; i < len(logs); i++ {
+		for j := i + 1; j < len(logs); j++ {
+			if logs[i].time.After(logs[j].time) {
+				logs[i], logs[j] = logs[j], logs[i]
+			}
+		}
+	}
+}
+
+// compressFile compresses a file.
+func compressFile(name string) error {
+	// Open the file for reading
+	f, err := os.Open(name)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	
+	// Create the compressed file
+	compressedName := name + ".gz"
+	cf, err := os.OpenFile(compressedName, os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer cf.Close()
+	
+	// Create a gzip writer
+	gw := gzip.NewWriter(cf)
+	defer gw.Close()
+	
+	// Copy the file to the gzip writer
+	if _, err := io.Copy(gw, f); err != nil {
+		return err
+	}
+	
+	// Close the gzip writer
+	if err := gw.Close(); err != nil {
+		return err
+	}
+	
+	// Remove the original file
+	return os.Remove(name)
+}
+
+// MultiWriter writes logs to multiple writers.
+type MultiWriter struct {
+	writers []LogWriter
+	mu      sync.Mutex
+}
+
+// NewMultiWriter creates a new MultiWriter.
+func NewMultiWriter(writers ...LogWriter) *MultiWriter {
+	return &MultiWriter{
+		writers: writers,
+	}
+}
+
+// Write implements io.Writer.
+func (w *MultiWriter) Write(p []byte) (n int, err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	
+	for _, writer := range w.writers {
+		_, err := writer.Write(p)
+		if err != nil {
+			return 0, err
+		}
+	}
+	
+	return len(p), nil
+}
+
+// Close implements LogWriter.
+func (w *MultiWriter) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	
+	var firstErr error
+	for _, writer := range w.writers {
+		if err := writer.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	
+	return firstErr
+}
+
+// AddWriter adds a writer to the MultiWriter.
+func (w *MultiWriter) AddWriter(writer LogWriter) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	
+	w.writers = append(w.writers, writer)
+}
+
+// RemoveWriter removes a writer from the MultiWriter.
+func (w *MultiWriter) RemoveWriter(writer LogWriter) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	
+	for i, wr := range w.writers {
+		if wr == writer {
+			w.writers = append(w.writers[:i], w.writers[i+1:]...)
+			break
+		}
+	}
+}CONTENT_END
+
+
+=== File: logger.go ===
+FILE_PATH: logger.go
+FILE_SIZE: 7729 bytes
+CONTENT_BEGIN
+package onelog
+
+import (
+	"bytes"
+	"context"
+	"io"
+	"os"
+	"runtime"
+	"sync"
+)
+
+// Logger is the main struct that provides logging functionality.
+type Logger struct {
+	level        *AtomicLevel
+	formatter    Formatter
+	writer       io.Writer
+	errorHandler func(error)
+	fieldPool    *fieldPool
+	EnableAsync  bool
+	asyncBuffer  *asyncBuffer
+	sampler      Sampler
+	enableCaller bool
+	callerSkip   int
+	hooks        []Hook
+}
+
+// Hook is a function that is called for each log entry.
+type Hook func(*Entry) error
+
+var (
+	// Buffer pool for temporary buffers
+	bufferPool = &sync.Pool{
+		New: func() interface{} {
+			return &bytes.Buffer{}
+		},
+	}
+
+	// Entry pool for reusing entries
+	entryPool = &sync.Pool{
+		New: func() interface{} {
+			return &Entry{
+				fields: make([]Field, 0, 8),
+			}
+		},
+	}
+	
+	// Global exit function for testing
+	exit = os.Exit
+)
+
+// New creates a new Logger with the given configuration.
+func New(config *Config) *Logger {
+	logger := &Logger{
+		level:        NewAtomicLevel(config.Level),
+		formatter:    config.Formatter,
+		writer:       config.Writer,
+		errorHandler: config.ErrorHandler,
+		fieldPool:    newFieldPool(1024),
+		EnableAsync:  config.EnableAsync,
+		sampler:      config.Sampler,
+		enableCaller: config.EnableCaller,
+		callerSkip:   config.CallerSkip,
+		hooks:        config.Hooks,
+	}
+
+	// Set default values if not provided
+	if logger.formatter == nil {
+		logger.formatter = &TextFormatter{}
+	}
+	if logger.writer == nil {
+		logger.writer = os.Stdout
+	}
+	if logger.EnableAsync {
+		bufferSize := config.AsyncBufferSize
+		if bufferSize <= 0 {
+			bufferSize = 8192 // Default buffer size
+		}
+		logger.asyncBuffer = newAsyncBuffer(bufferSize, logger.writer)
+	}
+
+	return logger
+}
+
+// WithLevel returns a new Logger with the given level.
+func (l *Logger) WithLevel(level Level) *Logger {
+	newLogger := *l
+	newLogger.level = NewAtomicLevel(level)
+	return &newLogger
+}
+
+// WithFormatter returns a new Logger with the given formatter.
+func (l *Logger) WithFormatter(formatter Formatter) *Logger {
+	newLogger := *l
+	newLogger.formatter = formatter
+	return &newLogger
+}
+
+// WithWriter returns a new Logger with the given writer.
+func (l *Logger) WithWriter(writer io.Writer) *Logger {
+	newLogger := *l
+	newLogger.writer = writer
+	if newLogger.EnableAsync {
+		newLogger.asyncBuffer = newAsyncBuffer(newLogger.asyncBuffer.size, writer)
+	}
+	return &newLogger
+}
+
+// WithErrorHandler returns a new Logger with the given error handler.
+func (l *Logger) WithErrorHandler(handler func(error)) *Logger {
+	newLogger := *l
+	newLogger.errorHandler = handler
+	return &newLogger
+}
+
+// WithAsync returns a new Logger with async logging enabled or disabled.
+func (l *Logger) WithAsync(enabled bool) *Logger {
+	newLogger := *l
+	newLogger.EnableAsync = enabled
+	if enabled && newLogger.asyncBuffer == nil {
+		newLogger.asyncBuffer = newAsyncBuffer(8192, newLogger.writer)
+	}
+	return &newLogger
+}
+
+// WithSampler returns a new Logger with the given sampler.
+func (l *Logger) WithSampler(sampler Sampler) *Logger {
+	newLogger := *l
+	newLogger.sampler = sampler
+	return &newLogger
+}
+
+// WithCaller returns a new Logger with caller information enabled or disabled.
+func (l *Logger) WithCaller(enabled bool) *Logger {
+	newLogger := *l
+	newLogger.enableCaller = enabled
+	return &newLogger
+}
+
+// WithHook returns a new Logger with the given hook added.
+func (l *Logger) WithHook(hook Hook) *Logger {
+	newLogger := *l
+	newLogger.hooks = append(newLogger.hooks, hook)
+	return &newLogger
+}
+
+// With returns a new Entry with the given fields.
+func (l *Logger) With(fields ...Field) *Entry {
+	e := l.newEntry()
+	e.WithFields(fields)
+	return e
+}
+
+// WithContext returns a new Entry with the given context.
+func (l *Logger) WithContext(ctx context.Context) *Entry {
+	e := l.newEntry()
+	e.WithContext(ctx)
+	return e
+}
+
+// Trace logs a message at the trace level.
+func (l *Logger) Trace(msg string, fields ...Field) {
+	if !l.level.Enabled(TraceLevel) {
+		return
+	}
+	e := l.newEntry()
+	e.WithFields(fields)
+	e.Trace(msg)
+}
+
+// Debug logs a message at the debug level.
+func (l *Logger) Debug(msg string, fields ...Field) {
+	if !l.level.Enabled(DebugLevel) {
+		return
+	}
+	e := l.newEntry()
+	e.WithFields(fields)
+	e.Debug(msg)
+}
+
+// Info logs a message at the info level.
+func (l *Logger) Info(msg string, fields ...Field) {
+	if !l.level.Enabled(InfoLevel) {
+		return
+	}
+	e := l.newEntry()
+	e.WithFields(fields)
+	e.Info(msg)
+}
+
+// Warn logs a message at the warn level.
+func (l *Logger) Warn(msg string, fields ...Field) {
+	if !l.level.Enabled(WarnLevel) {
+		return
+	}
+	e := l.newEntry()
+	e.WithFields(fields)
+	e.Warn(msg)
+}
+
+// Error logs a message at the error level.
+func (l *Logger) Error(msg string, fields ...Field) {
+	if !l.level.Enabled(ErrorLevel) {
+		return
+	}
+	e := l.newEntry()
+	e.WithFields(fields)
+	e.Error(msg)
+}
+
+// Fatal logs a message at the fatal level and calls os.Exit(1).
+func (l *Logger) Fatal(msg string, fields ...Field) {
+	if !l.level.Enabled(FatalLevel) {
+		return
+	}
+	e := l.newEntry()
+	e.WithFields(fields)
+	e.Fatal(msg)
+}
+
+// Tracef logs a formatted message at the trace level.
+func (l *Logger) Tracef(format string, args ...interface{}) {
+	if !l.level.Enabled(TraceLevel) {
+		return
+	}
+	e := l.newEntry()
+	e.Tracef(format, args...)
+}
+
+// Debugf logs a formatted message at the debug level.
+func (l *Logger) Debugf(format string, args ...interface{}) {
+	if !l.level.Enabled(DebugLevel) {
+		return
+	}
+	e := l.newEntry()
+	e.Debugf(format, args...)
+}
+
+// Infof logs a formatted message at the info level.
+func (l *Logger) Infof(format string, args ...interface{}) {
+	if !l.level.Enabled(InfoLevel) {
+		return
+	}
+	e := l.newEntry()
+	e.Infof(format, args...)
+}
+
+// Warnf logs a formatted message at the warn level.
+func (l *Logger) Warnf(format string, args ...interface{}) {
+	if !l.level.Enabled(WarnLevel) {
+		return
+	}
+	e := l.newEntry()
+	e.Warnf(format, args...)
+}
+
+// Errorf logs a formatted message at the error level.
+func (l *Logger) Errorf(format string, args ...interface{}) {
+	if !l.level.Enabled(ErrorLevel) {
+		return
+	}
+	e := l.newEntry()
+	e.Errorf(format, args...)
+}
+
+// Fatalf logs a formatted message at the fatal level and calls os.Exit(1).
+func (l *Logger) Fatalf(format string, args ...interface{}) {
+	if !l.level.Enabled(FatalLevel) {
+		return
+	}
+	e := l.newEntry()
+	e.Fatalf(format, args...)
+}
+
+// Writer returns an io.Writer that writes to the logger at the given level.
+func (l *Logger) Writer(level Level) io.Writer {
+	return l.newEntry().Writer(level)
+}
+
+// Close closes the logger, flushing any buffered log entries.
+func (l *Logger) Close() error {
+	if l.EnableAsync && l.asyncBuffer != nil {
+		return l.asyncBuffer.close()
+	}
+	return nil
+}
+
+// SetLevel sets the logger's level.
+func (l *Logger) SetLevel(level Level) {
+	l.level.SetLevel(level)
+}
+
+// GetLevel returns the logger's level.
+func (l *Logger) GetLevel() Level {
+	return l.level.Level()
+}
+
+// writeAsync writes the given bytes to the async buffer.
+func (l *Logger) writeAsync(p []byte) {
+	if l.asyncBuffer == nil {
+		// Fallback to synchronous write if async buffer is not initialized
+		if _, err := l.writer.Write(p); err != nil && l.errorHandler != nil {
+			l.errorHandler(err)
+		}
+		return
+	}
+
+	if err := l.asyncBuffer.write(p); err != nil && l.errorHandler != nil {
+		l.errorHandler(err)
+	}
+}
+
+// getCaller returns the file and line number of the caller.
+func getCaller(skip int) *CallerInfo {
+	pc, file, line, ok := runtime.Caller(skip + 1)
+	if !ok {
+		return &CallerInfo{
+			File:     "unknown",
+			Line:     0,
+			Function: "unknown",
+		}
+	}
+
+	fn := runtime.FuncForPC(pc)
+	funcName := "unknown"
+	if fn != nil {
+		funcName = fn.Name()
+	}
+
+	return &CallerInfo{
+		File:     file,
+		Line:     line,
+		Function: funcName,
+	}
+}CONTENT_END
+
+
+=== File: utils.go ===
+FILE_PATH: utils.go
+FILE_SIZE: 4892 bytes
+CONTENT_BEGIN
+package onelog
+
+import (
+	"bytes"
+	"io"
+	"strconv"
+	"strings"
+	"unicode/utf8"
+)
+
+const (
+	hex = "0123456789abcdef"
+)
+
+// itoa appends the string form of the integer i to dst and returns
+// the extended buffer.
+func itoa(dst *bytes.Buffer, i int64, base int) error {
+	s := strconv.FormatInt(i, base)
+	_, err := dst.WriteString(s)
+	return err
+}
+
+// uitoa appends the string form of the unsigned integer i to dst and returns
+// the extended buffer.
+func uitoa(dst *bytes.Buffer, i uint64, base int) error {
+	s := strconv.FormatUint(i, base)
+	_, err := dst.WriteString(s)
+	return err
+}
+
+// ftoa appends the string form of the float f to dst and returns the
+// extended buffer.
+func ftoa(dst *bytes.Buffer, f float64) error {
+	s := strconv.FormatFloat(f, 'f', -1, 64)
+	_, err := dst.WriteString(s)
+	return err
+}
+
+// appendQuote appends a quoted string to the buffer.
+func appendQuote(dst *bytes.Buffer, s string) error {
+	err := dst.WriteByte('"')
+	if err != nil {
+		return err
+	}
+	
+	err = appendEscapedString(dst, s)
+	if err != nil {
+		return err
+	}
+	
+	return dst.WriteByte('"')
+}
+
+// appendEscapedString appends an escaped string to the buffer.
+func appendEscapedString(dst *bytes.Buffer, s string) error {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		
+		if c < utf8.RuneSelf && c >= ' ' && c != '\\' && c != '"' {
+			err := dst.WriteByte(c)
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		
+		switch c {
+		case '\\', '"':
+			if err := dst.WriteByte('\\'); err != nil {
+				return err
+			}
+			if err := dst.WriteByte(c); err != nil {
+				return err
+			}
+		case '\n':
+			if err := dst.WriteByte('\\'); err != nil {
+				return err
+			}
+			if err := dst.WriteByte('n'); err != nil {
+				return err
+			}
+		case '\r':
+			if err := dst.WriteByte('\\'); err != nil {
+				return err
+			}
+			if err := dst.WriteByte('r'); err != nil {
+				return err
+			}
+		case '\t':
+			if err := dst.WriteByte('\\'); err != nil {
+				return err
+			}
+			if err := dst.WriteByte('t'); err != nil {
+				return err
+			}
+		default:
+			if err := dst.WriteByte('\\'); err != nil {
+				return err
+			}
+			if err := dst.WriteByte('u'); err != nil {
+				return err
+			}
+			if err := dst.WriteByte('0'); err != nil {
+				return err
+			}
+			if err := dst.WriteByte('0'); err != nil {
+				return err
+			}
+			if err := dst.WriteByte(hex[c>>4]); err != nil {
+				return err
+			}
+			if err := dst.WriteByte(hex[c&0xF]); err != nil {
+				return err
+			}
+		}
+	}
+	
+	return nil
+}
+
+// truncateString truncates a string to the given length.
+func truncateString(s string, length int) string {
+	if length <= 0 || len(s) <= length {
+		return s
+	}
+	return s[:length]
+}
+
+// copyBuffer copies from src to dst until either EOF is reached
+// on src or an error occurs. Similar to io.Copy but allows reusing
+// a buffer across calls to reduce allocations.
+func copyBuffer(dst io.Writer, src io.Reader, buf []byte) (written int64, err error) {
+	if buf == nil {
+		buf = make([]byte, 32*1024)
+	}
+	
+	for {
+		nr, er := src.Read(buf)
+		if nr > 0 {
+			nw, ew := dst.Write(buf[0:nr])
+			if nw > 0 {
+				written += int64(nw)
+			}
+			if ew != nil {
+				err = ew
+				break
+			}
+			if nr != nw {
+				err = io.ErrShortWrite
+				break
+			}
+		}
+		if er != nil {
+			if er != io.EOF {
+				err = er
+			}
+			break
+		}
+	}
+	
+	return written, err
+}
+
+// SafeString returns a string that is safe to use in logs.
+// It truncates the string if it's too long and replaces
+// control characters with their escape sequences.
+func SafeString(s string, maxLength int) string {
+	if maxLength > 0 && len(s) > maxLength {
+		s = s[:maxLength]
+	}
+	
+	if !needsEscaping(s) {
+		return s
+	}
+	
+	buf := new(bytes.Buffer)
+	
+	appendEscapedString(buf, s)
+	return buf.String()
+}
+
+// needsEscaping returns true if the string contains
+// characters that need to be escaped.
+func needsEscaping(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < utf8.RuneSelf && c < ' ' || c == '\\' || c == '"' {
+			return true
+		}
+	}
+	return false
+}
+
+// SensitiveKeys contains keys that should be redacted in logs.
+var SensitiveKeys = []string{
+	"password", "passwd", "secret", "token", "auth",
+	"credential", "credentials", "api_key", "apikey",
+	"access_token", "accesstoken", "refresh_token",
+}
+
+// IsSensitiveKey returns true if the key is sensitive.
+func IsSensitiveKey(key string) bool {
+	lowerKey := strings.ToLower(key)
+	for _, sensitiveKey := range SensitiveKeys {
+		if strings.Contains(lowerKey, sensitiveKey) {
+			return true
+		}
+	}
+	return false
+}
+
+// toLower converts a string to lowercase without allocations.
+func toLower(s string) string {
+	hasUpper := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			hasUpper = true
+			break
+		}
+	}
+	if !hasUpper {
+		return s
+	}
+	
+	var b strings.Builder
+	b.Grow(len(s))
+	
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		b.WriteByte(c)
+	}
+	
+	return b.String()
+}CONTENT_END
