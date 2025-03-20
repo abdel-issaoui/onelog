@@ -1,0 +1,15 @@
+run:
+  timeout: 5m # Sets a maximum time limit for linting (adjust if needed)
+
+linters:
+  enable:
+  - gofmt # Ensures code is properly formatted per Go standards
+  - goimports # Checks and enforces correct import statements
+  - govet # Identifies suspicious constructs (e.g., shadowed variables)
+  - staticcheck # Performs advanced static analysis for potential bugs
+  - revive # Enforces Go style conventions (e.g., naming, documentation)
+  - errcheck # Flags unchecked errors, critical for reliable logging
+  - ineffassign # Detects ineffective assignments that could hide bugs
+  - unused # Finds unused variables or constants
+  - misspell # Catches spelling errors in comments and strings
+  - gosec # Scans for security issues, like logging sensitive data
